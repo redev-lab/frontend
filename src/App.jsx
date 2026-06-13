@@ -31,9 +31,11 @@ function Facts({ r }) {
   const el = r.stages?.["진입_eligibility"]?.result?.["진단_토허"];
   return (
     <div className="facts">
-      <div className="row big">{r.candidate ? "재개발 환경 후보" : "후보 아님(저신뢰)"}</div>
-      <div className="row">환경 점수: <b>{fe ? `상위 ${fe.rank_top_pct}%` : "—"}</b></div>
-      <div className="row">요건 판정: <b>{rq?.path ?? "—"}</b></div>
+      {/* 신뢰도는 r.confidence(임계값 거리 기반) — 점수와 역전되지 않게 */}
+      <div className="row big">{(r.candidate ? "재개발 환경 후보" : "후보 아님") + (r.confidence ? `(${r.confidence})` : "")}</div>
+      {/* ★헤더도 본문과 같은 상위/하위 규칙(rank_phrase) 사용 — 헤더-본문 충돌 방지 */}
+      <div className="row">환경 점수: <b>{fe ? fe.rank_phrase : "—"}</b></div>
+      <div className="row">요건 판정: <b>{rq?.path ?? "산출 불가"}</b></div>
       <div className="row">토허: <b>{el ? (el.toheo_applies ? "적용(갭투자 불가)" : "미적용") : "—"}</b></div>
       <div className="muted">추정·참고치 · 투자 권유 아님</div>
     </div>
@@ -47,10 +49,10 @@ function ReportPanel({ r }) {
     <div>
       <Facts r={r} />
       <div className="report-text">{r.report?.report_text}</div>
-      {/* ★caveat은 접힘/펼침 — 내용 동일, 위계만 */}
+      {/* ★caveat 패널도 사용자 언어 번역본(report.caveats_user) — 내부코드 R##·§ 노출 금지 */}
       <details>
-        <summary>한계·주의 ({r.caveats?.length || 0})</summary>
-        <ul>{(r.caveats || []).map((c, i) => <li key={i}>{c}</li>)}</ul>
+        <summary>한계·주의 ({r.report?.caveats_user?.length || 0})</summary>
+        <ul>{(r.report?.caveats_user || []).map((c, i) => <li key={i}>{c}</li>)}</ul>
       </details>
     </div>
   );
