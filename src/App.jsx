@@ -1,10 +1,25 @@
 import React, { useState, useRef } from "react";
-import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
+import { MapContainer, TileLayer, CircleMarker, Marker, Polygon, Tooltip, useMapEvents, useMap } from "react-leaflet";
 
 const SEOUL = [37.55, 126.99];
-const color = (pct) => `hsl(${(1 - pct) * 220}, 85%, 50%)`; // 백분위 높음=빨강
+// ★색 = 재개발 환경 유사도 백분위. 빨강(높음=재개발된 동네와 닮음) → 초록(낮음=거리 멂).
+const color = (pct) => `hsl(${(1 - pct) * 120}, 80%, 45%)`;
+// 유사도 등급(백분위 → 높음/중간/낮음). rank_top_pct: 작을수록 상위(닮음).
+const simGrade = (pct) => (pct == null ? null : pct <= 33 ? "높음" : pct <= 66 ? "중간" : "낮음");
 
-// ★렌더 절제: 화면 영역(bbox) 필지만 — moveend마다 /screen/bbox 조회
+// 볼록껍질(monotone chain) — 군집 점들의 외곽선. pts=[[lat,lon],...] → 껍질 [[lat,lon],...].
+function convexHull(pts) {
+  if (pts.length < 3) return pts;
+  const P = pts.map((p) => [p[1], p[0]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]); // [x=lon,y=lat]
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [];
+  for (const p of P) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  const up = [];
+  for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+  return lo.slice(0, -1).concat(up.slice(0, -1)).map((p) => [p[1], p[0]]); // → [lat,lon]
+}
+
+// ★렌더 절제: 화면 영역(bbox) 필지만 — moveend마다 /screen/bbox 조회. 군집은 외곽선(점선)으로.
 function BboxLayer() {
   const [pts, setPts] = useState([]);
   const fetchBbox = (map) => {
@@ -14,9 +29,23 @@ function BboxLayer() {
     fetch(`/screen/bbox?${q}`).then((r) => r.json()).then((d) => setPts(d.results || []));
   };
   const map = useMapEvents({ moveend: () => fetchBbox(map) });
-  return pts.map((p) => (
-    <CircleMarker key={p.pnu} center={[p.lat, p.lon]} radius={4} pathOptions={{ color: color(p.score_pct), fillOpacity: 0.6, weight: 0 }} />
-  ));
+  const groups = {};   // 군집별 점 모음(외곽선용)
+  pts.forEach((p) => { if (p.cluster) (groups[p.cluster] = groups[p.cluster] || []).push([p.lat, p.lon]); });
+  return (
+    <>
+      {Object.entries(groups).filter(([, g]) => g.length >= 5).map(([id, g]) => {
+        const h = convexHull(g);
+        return h.length >= 3 ? (
+          <Polygon key={id} positions={h} pathOptions={{ color: "#b91c1c", weight: 1.5, dashArray: "6 5", fill: false }}>
+            <Tooltip sticky>노후 환경이 모인 후보 범위 (참고 · 정밀 경계 아님)</Tooltip>
+          </Polygon>
+        ) : null;
+      })}
+      {pts.map((p) => (
+        <CircleMarker key={p.pnu} center={[p.lat, p.lon]} radius={4} pathOptions={{ color: color(p.score_pct), fillOpacity: 0.65, weight: 0 }} />
+      ))}
+    </>
+  );
 }
 
 function FlyTo({ pos }) {
@@ -48,15 +77,18 @@ function Hero({ r }) {
   const el = r.stages?.["진입_eligibility"]?.result?.["진단_토허"];
   const cls = r.in_zone ? "지정 정비구역" : r.candidate ? "재개발 환경 유사" : "환경 유사 아님";
   const tone = r.in_zone ? "t-desig" : r.candidate ? "t-cand" : "t-none";
+  const g = simGrade(fe?.rank_top_pct);   // 높음/중간/낮음
   return (
     <div className={`hero ${tone}`}>
       <div className="hero-label">{cls}{r.confidence ? <span className="conf">{r.confidence}</span> : null}</div>
       {r.verdict?.headline && <div className="hero-sub">{r.verdict.headline}</div>}
       <div className="chips">
-        <div className="chip"><span className="ck">환경순위</span><span className="cv">{fe ? fe.rank_phrase : "—"}</span></div>
+        {/* ★방향 명시: 등급(높음/중간/낮음) + 백분위. 의미는 아래 help가 항상 설명 */}
+        <div className="chip"><span className="ck">환경 유사도</span><span className="cv" data-g={g || ""}>{g || "—"}</span><span className="csub">{fe ? fe.rank_phrase : ""}</span></div>
         <div className="chip"><span className="ck">요건</span><span className="cv">{rq?.path ?? "산출 불가"}</span></div>
         <div className="chip"><span className="ck">토허</span><span className="cv">{el ? (el.toheo_applies ? "적용" : "미적용") : "—"}</span></div>
       </div>
+      <div className="hero-help">유사도 = 재개발된 동네와 노후 환경이 닮은 정도(<b>높음=닮음</b>·낮음=거리 멂). ※ 닮음 ≠ 재개발 확정</div>
     </div>
   );
 }
@@ -121,6 +153,19 @@ function Screener({ onPick }) {
   );
 }
 
+// ★지도 범례 — 색 스케일 + 의미 + R18 오독 차단(유사도일 뿐 재개발 확정 아님) + 군집 설명.
+function MapLegend() {
+  return (
+    <div className="legend">
+      <div className="lg-title">색 = 재개발 환경 유사도</div>
+      <div className="lg-bar"><span>높음</span><div className="lg-grad" /><span>낮음</span></div>
+      <div className="lg-note"><b style={{ color: "#b91c1c" }}>빨강</b> = 노후 환경이 재개발된 동네와 닮음 · <b style={{ color: "#15803d" }}>초록</b> = 거리 멂</div>
+      <div className="lg-note">⬚ 점선 = 후보 군집(노후 환경이 모인 범위, 참고)</div>
+      <div className="lg-warn">※ 색은 노후 환경 유사도일 뿐, 재개발 확정·가능성이 아닙니다</div>
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("search");
   const [addr, setAddr] = useState("성북구 정릉동 170-1");
@@ -161,7 +206,7 @@ export default function App() {
           {pos && <Marker position={pos} />}
           <FlyTo pos={pos} />
         </MapContainer>
-        <div className="legend">색 = 환경 점수 백분위 (빨강=상위)</div>
+        <MapLegend />
       </div>
     </div>
   );
