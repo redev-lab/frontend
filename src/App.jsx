@@ -25,19 +25,38 @@ function FlyTo({ pos }) {
   return null;
 }
 
-function Facts({ r }) {
+// 5종 판단 섹션 — 아이콘·부제(위계). LLM/템플릿 본문의 '### 라벨'과 매칭.
+const SECTION_META = {
+  "될까": { ic: "🏘️", sub: "사업 환경" }, "얼마": { ic: "💰", sub: "시세·계획" },
+  "언제": { ic: "⏳", sub: "사업 단계" }, "리스크": { ic: "⚠️", sub: "리스크" },
+  "진입": { ic: "🚪", sub: "진입 가능성" },
+};
+
+// 본문(### 라벨\n내용)을 섹션 카드로 분해. 태그 없는 깨끗한 문장만 들어온다(백엔드가 제거).
+function parseSections(text) {
+  if (!text) return [];
+  return text.split(/^###\s+/m).map((b) => b.trim()).filter(Boolean).map((blk) => {
+    const nl = blk.indexOf("\n");
+    return { label: (nl < 0 ? blk : blk.slice(0, nl)).trim(), body: (nl < 0 ? "" : blk.slice(nl + 1)).trim() };
+  });
+}
+
+// ★상단 히어로 — 한 줄 결론 + 핵심 3칩. in_zone(지정)≠candidate(환경유사) 구분, 신뢰도 병기.
+function Hero({ r }) {
   const fe = r.stages?.["예언_환경점수"]?.result;
   const rq = r.stages?.["진단_요건"]?.result;
   const el = r.stages?.["진입_eligibility"]?.result?.["진단_토허"];
+  const cls = r.in_zone ? "지정 정비구역" : r.candidate ? "재개발 환경 유사" : "환경 유사 아님";
+  const tone = r.in_zone ? "t-desig" : r.candidate ? "t-cand" : "t-none";
   return (
-    <div className="facts">
-      {/* ★in_zone(실제 지정구역)≠candidate(환경 유사). '지정됨' 오독 차단. 신뢰도는 임계값 거리 기반 */}
-      <div className="row big">{(r.in_zone ? "지정 정비구역" : r.candidate ? "재개발 환경 유사(지정 아님)" : "환경 유사 아님") + (r.confidence ? `(${r.confidence})` : "")}</div>
-      {/* ★헤더도 본문과 같은 상위/하위 규칙(rank_phrase) 사용 — 헤더-본문 충돌 방지 */}
-      <div className="row">환경 점수: <b>{fe ? fe.rank_phrase : "—"}</b></div>
-      <div className="row">요건 판정: <b>{rq?.path ?? "산출 불가"}</b></div>
-      <div className="row">토허: <b>{el ? (el.toheo_applies ? "적용(갭투자 불가)" : "미적용") : "—"}</b></div>
-      <div className="muted">추정·참고치 · 투자 권유 아님</div>
+    <div className={`hero ${tone}`}>
+      <div className="hero-label">{cls}{r.confidence ? <span className="conf">{r.confidence}</span> : null}</div>
+      {r.verdict?.headline && <div className="hero-sub">{r.verdict.headline}</div>}
+      <div className="chips">
+        <div className="chip"><span className="ck">환경순위</span><span className="cv">{fe ? fe.rank_phrase : "—"}</span></div>
+        <div className="chip"><span className="ck">요건</span><span className="cv">{rq?.path ?? "산출 불가"}</span></div>
+        <div className="chip"><span className="ck">토허</span><span className="cv">{el ? (el.toheo_applies ? "적용" : "미적용") : "—"}</span></div>
+      </div>
     </div>
   );
 }
@@ -45,15 +64,34 @@ function Facts({ r }) {
 function ReportPanel({ r }) {
   if (!r) return <p className="muted">주소를 입력하면 5종 판단 리포트가 나옵니다.</p>;
   if (r.error) return <p style={{ color: "#c00" }}>{r.error}</p>;
+  const sections = parseSections(r.report?.report_text);
+  const facts = r.report?.source_facts || {};
   return (
-    <div>
-      <Facts r={r} />
-      <div className="report-text">{r.report?.report_text}</div>
-      {/* ★caveat 패널도 사용자 언어 번역본(report.caveats_user) — 내부코드 R##·§ 노출 금지 */}
+    <div className="report">
+      <Hero r={r} />
+      <div className="cards">
+        {sections.map((s, i) => {
+          const m = SECTION_META[s.label] || { ic: "•", sub: "" };
+          return (
+            <div key={i} className="card">
+              <div className="card-h"><span className="ic">{m.ic}</span><b>{s.label}</b><span className="card-sub">{m.sub}</span></div>
+              <div className="card-b">{s.body}</div>
+            </div>
+          );
+        })}
+      </div>
+      {/* ★출처는 화면에서 빼되 메타로 보존 — 클릭하면 표시값(키→값) 확인(정직성 장치 유지) */}
+      <details className="src">
+        <summary>출처·근거 ({Object.keys(facts).length})</summary>
+        <table className="src-t"><tbody>{Object.entries(facts).map(([k, v]) => (
+          <tr key={k}><td>{k}</td><td>{v}</td></tr>))}</tbody></table>
+      </details>
+      {/* ★caveat도 사용자 언어 번역본(caveats_user) — 내부코드 R##·§ 노출 금지, 접힘 유지 */}
       <details>
         <summary>한계·주의 ({r.report?.caveats_user?.length || 0})</summary>
         <ul>{(r.report?.caveats_user || []).map((c, i) => <li key={i}>{c}</li>)}</ul>
       </details>
+      <div className="muted">추정·참고치 · 투자 권유 아님</div>
     </div>
   );
 }
