@@ -31,8 +31,8 @@ function Facts({ r }) {
   const el = r.stages?.["진입_eligibility"]?.result?.["진단_토허"];
   return (
     <div className="facts">
-      {/* 신뢰도는 r.confidence(임계값 거리 기반) — 점수와 역전되지 않게 */}
-      <div className="row big">{(r.candidate ? "재개발 환경 후보" : "후보 아님") + (r.confidence ? `(${r.confidence})` : "")}</div>
+      {/* ★in_zone(실제 지정구역)≠candidate(환경 유사). '지정됨' 오독 차단. 신뢰도는 임계값 거리 기반 */}
+      <div className="row big">{(r.in_zone ? "지정 정비구역" : r.candidate ? "재개발 환경 유사(지정 아님)" : "환경 유사 아님") + (r.confidence ? `(${r.confidence})` : "")}</div>
       {/* ★헤더도 본문과 같은 상위/하위 규칙(rank_phrase) 사용 — 헤더-본문 충돌 방지 */}
       <div className="row">환경 점수: <b>{fe ? fe.rank_phrase : "—"}</b></div>
       <div className="row">요건 판정: <b>{rq?.path ?? "산출 불가"}</b></div>
@@ -90,7 +90,8 @@ export default function App() {
   const [pos, setPos] = useState(null);
   const search = () => {
     setReport({ loading: true });
-    fetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: addr, property_type: "다세대", stage: "사업시행인가" }) })
+    /* ★stage 하드코딩 금지(누수 경로) — 실제 단계를 모르면 보내지 않는다. in_zone+stage일 때만 '언제' 출력 */
+    fetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: addr, property_type: "다세대" }) })
       .then((r) => r.json())
       .then((r) => { setReport(r); if (r.lat) setPos([r.lat, r.lon]); })
       .catch((e) => setReport({ error: String(e) }));
