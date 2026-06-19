@@ -11,6 +11,8 @@ body { margin: 0; font-family: -apple-system, "Malgun Gothic", sans-serif; }
 .search button { padding: 8px 12px; background: #2563eb; color: #fff; border: 0; cursor: pointer; }
 /* ★리포트 위계: 히어로 카드(결론+3칩) → 섹션 카드 → 접힘(출처·한계) */
 .report { display: flex; flex-direction: column; gap: 10px; }
+/* ★7구 밖 부분 리포트 고지 — 정직(상세 미제공·점수 과신 방지) */
+.partial-note { background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; border-radius: 9px; padding: 10px 12px; font-size: 12px; line-height: 1.55; }
 /* 히어로 — 한 줄 결론 + 핵심 3칩. tone별 색(지정=파랑/후보=호박/비대상=회색) */
 .hero { border-radius: 12px; padding: 14px 16px; color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
 .hero.t-desig { background: linear-gradient(135deg, #1d4ed8, #2563eb); }

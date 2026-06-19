@@ -73,12 +73,15 @@ function Hero({ r }) {
 function ReportPanel({ r }) {
   if (!r) return <p className="muted">주소를 입력하면 5종 판단 리포트가 나옵니다.</p>;
   if (r.error) return <p style={{ color: "#c00" }}>{r.error}</p>;
+  const partial = r.scope === "global_partial";   // ★7구 밖 — 환경 점수·판정만(상세 미제공)
   const sections = parseSections(r.report?.report_text);
   const facts = r.report?.source_facts || {};
   return (
     <div className="report">
       <Hero r={r} />
-      <div className="cards">
+      {/* ★7구 밖 정직 고지 — '왜 시세 없냐' 오해 + 점수 과신 방지 */}
+      {partial && <div className="partial-note">ℹ️ {r.report?.partial_note}</div>}
+      {sections.length > 0 && <div className="cards">
         {sections.map((s, i) => {
           const m = SECTION_META[s.label] || { ic: "•", sub: "" };
           return (
@@ -88,13 +91,13 @@ function ReportPanel({ r }) {
             </div>
           );
         })}
-      </div>
+      </div>}
       {/* ★출처는 화면에서 빼되 메타로 보존 — 클릭하면 표시값(키→값) 확인(정직성 장치 유지) */}
-      <details className="src">
+      {Object.keys(facts).length > 0 && <details className="src">
         <summary>출처·근거 ({Object.keys(facts).length})</summary>
         <table className="src-t"><tbody>{Object.entries(facts).map(([k, v]) => (
           <tr key={k}><td>{k}</td><td>{v}</td></tr>))}</tbody></table>
-      </details>
+      </details>}
       {/* ★caveat도 사용자 언어 번역본(caveats_user) — 내부코드 R##·§ 노출 금지, 접힘 유지 */}
       <details>
         <summary>한계·주의 ({r.report?.caveats_user?.length || 0})</summary>
