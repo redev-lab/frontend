@@ -129,26 +129,55 @@ function ReportPanel({ r }) {
 }
 
 function Screener({ onPick }) {
-  const [gu, setGu] = useState("11440");
-  const [minPct, setMinPct] = useState(0.9);
+  const [gu, setGu] = useState("11590");
+  const [kind, setKind] = useState("cluster");     // ★주 필터: 지정/후보/전체 — 의미있게 좁힘
+  const [band, setBand] = useState(0.75);          // 보조: 환경 상위 N%(포화한 raw 점수 대신)
   const [items, setItems] = useState([]);
-  const run = () => fetch(`/screen?gu=${gu}&min_pct=${minPct}&top_k=30`).then((r) => r.json()).then((d) => setItems(d.results || []));
+  const [loading, setLoading] = useState(false);
+  const [ran, setRan] = useState(false);
+  const run = () => {
+    setLoading(true);
+    fetch(`/screen?gu=${gu}&kind=${kind}&min_pct=${band}&top_k=30`).then((r) => r.json())
+      .then((d) => { setItems(d.results || []); setLoading(false); setRan(true); });
+  };
   return (
     <div>
       <div className="filters">
         <select value={gu} onChange={(e) => setGu(e.target.value)}>
-          <option value="11290">성북</option><option value="11590">동작</option>
-          <option value="11380">은평</option><option value="11530">구로</option>
-          <option value="11440">마포</option><option value="11680">강남</option>
+          <option value="11290">성북구</option><option value="11590">동작구</option>
+          <option value="11380">은평구</option><option value="11530">구로구</option>
+          <option value="11440">마포구</option><option value="11680">강남구</option>
         </select>
-        <input type="number" step="0.05" min="0" max="1" value={minPct} onChange={(e) => setMinPct(e.target.value)} />
+        {/* ★주 필터 — 카테고리로 의미있게 좁힘 */}
+        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="cluster">후보 군집</option>
+          <option value="zone">지정 정비구역</option>
+          <option value="all">전체(환경 상위)</option>
+        </select>
+        {/* 보조 — 환경 상위 밴드(절대 점수 0.9 대신, 포화 무관) */}
+        <select value={band} onChange={(e) => setBand(+e.target.value)}>
+          <option value={0.95}>상위 5%</option>
+          <option value={0.90}>상위 10%</option>
+          <option value={0.75}>상위 25%</option>
+        </select>
         <button onClick={run}>검색</button>
       </div>
-      {items.map((it) => (
-        <div key={it.pnu} className="screen-item" onClick={() => onPick([it.lat, it.lon])}>
-          …{it.pnu.slice(-8)} · 점수 {it.score.toFixed(3)} · 상위 {(100 * (1 - it.score_pct)).toFixed(0)}%
-        </div>
-      ))}
+      {loading ? <p className="muted">검색 중…</p>
+        : !ran ? <p className="muted">구 + 환경 상위 밴드를 고르고 검색하세요.</p>
+        : items.length === 0 ? <p className="muted">해당 조건의 후보가 없습니다.</p>
+        : items.map((it) => {
+          const badge = it.in_zone ? (it.zone_name || "지정 정비구역") : it.cluster ? "후보 군집" : "관심";
+          const tone = it.in_zone ? "b-desig" : it.cluster ? "b-cand" : "b-none";
+          return (
+            <div key={it.pnu} className="screen-item" onClick={() => onPick([it.lat, it.lon])}>
+              <div className="si-top">
+                <span className="si-addr">{it.address || ("필지 …" + it.pnu.slice(-8))}</span>
+                <span className={`si-badge ${tone}`}>{badge}</span>
+              </div>
+              <div className="si-meta">재개발 환경 유사 {simGrade(it.rank_pct) || "—"} · 전 구역 상위 {it.rank_pct}%</div>
+            </div>
+          );
+        })}
     </div>
   );
 }
