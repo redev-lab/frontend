@@ -18,8 +18,10 @@ function BboxLayer() {
     fetch(`/screen/bbox?${q}`).then((r) => r.json()).then((d) => setPts(d.results || []));
   };
   const map = useMapEvents({ moveend: () => fetchBbox(map) });
+  // 줌아웃 시 백엔드가 점수 무관 균등 샘플로 솎음(분포 보존) → 색 인상 줌 일관. 각 점=필지 환경 유사도.
   return pts.map((p) => (
-    <CircleMarker key={p.pnu} center={[p.lat, p.lon]} radius={4} pathOptions={{ color: color(p.score_pct), fillOpacity: 0.65, weight: 0 }} />
+    <CircleMarker key={p.pnu} center={[p.lat, p.lon]} radius={4}
+      pathOptions={{ color: color(p.score_pct), fillOpacity: 0.6, weight: 0 }} />
   ));
 }
 
