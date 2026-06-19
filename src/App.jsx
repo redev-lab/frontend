@@ -2,9 +2,13 @@ import React, { useState, useRef } from "react";
 import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
 
 const SEOUL = [37.55, 126.99];
-const color = (pct) => `hsl(${(1 - pct) * 220}, 85%, 50%)`; // 백분위 높음=빨강
+// ★색 = 재개발 환경 유사도 백분위. 빨강(높음=재개발된 동네와 닮음) → 초록(낮음=거리 멂).
+const color = (pct) => `hsl(${(1 - pct) * 120}, 80%, 45%)`;
+// 유사도 등급(백분위 → 높음/중간/낮음). rank_top_pct: 작을수록 상위(닮음).
+const simGrade = (pct) => (pct == null ? null : pct <= 33 ? "높음" : pct <= 66 ? "중간" : "낮음");
 
-// ★렌더 절제: 화면 영역(bbox) 필지만 — moveend마다 /screen/bbox 조회
+// ★렌더 절제: 화면 영역(bbox) 필지만 — moveend마다 /screen/bbox 조회. 점 색으로 환경 유사도 표현.
+// ★군집 외곽선(점선)은 제거 — 볼록껍질이 도로·공원을 가로질러 '재개발 구역 경계'로 오독 위험(근거 약함).
 function BboxLayer() {
   const [pts, setPts] = useState([]);
   const fetchBbox = (map) => {
@@ -14,8 +18,10 @@ function BboxLayer() {
     fetch(`/screen/bbox?${q}`).then((r) => r.json()).then((d) => setPts(d.results || []));
   };
   const map = useMapEvents({ moveend: () => fetchBbox(map) });
+  // 줌아웃 시 백엔드가 점수 무관 균등 샘플로 솎음(분포 보존) → 색 인상 줌 일관. 각 점=필지 환경 유사도.
   return pts.map((p) => (
-    <CircleMarker key={p.pnu} center={[p.lat, p.lon]} radius={4} pathOptions={{ color: color(p.score_pct), fillOpacity: 0.6, weight: 0 }} />
+    <CircleMarker key={p.pnu} center={[p.lat, p.lon]} radius={4}
+      pathOptions={{ color: color(p.score_pct), fillOpacity: 0.6, weight: 0 }} />
   ));
 }
 
@@ -25,19 +31,41 @@ function FlyTo({ pos }) {
   return null;
 }
 
-function Facts({ r }) {
+// 5종 판단 섹션 — 아이콘·부제(위계). LLM/템플릿 본문의 '### 라벨'과 매칭.
+const SECTION_META = {
+  "될까": { ic: "🏘️", sub: "사업 환경" }, "얼마": { ic: "💰", sub: "시세·계획" },
+  "언제": { ic: "⏳", sub: "사업 단계" }, "리스크": { ic: "⚠️", sub: "리스크" },
+  "진입": { ic: "🚪", sub: "진입 가능성" },
+};
+
+// 본문(### 라벨\n내용)을 섹션 카드로 분해. 태그 없는 깨끗한 문장만 들어온다(백엔드가 제거).
+function parseSections(text) {
+  if (!text) return [];
+  return text.split(/^###\s+/m).map((b) => b.trim()).filter(Boolean).map((blk) => {
+    const nl = blk.indexOf("\n");
+    return { label: (nl < 0 ? blk : blk.slice(0, nl)).trim(), body: (nl < 0 ? "" : blk.slice(nl + 1)).trim() };
+  });
+}
+
+// ★상단 히어로 — 한 줄 결론 + 핵심 3칩. in_zone(지정)≠candidate(환경유사) 구분, 신뢰도 병기.
+function Hero({ r }) {
   const fe = r.stages?.["예언_환경점수"]?.result;
   const rq = r.stages?.["진단_요건"]?.result;
   const el = r.stages?.["진입_eligibility"]?.result?.["진단_토허"];
+  const cls = r.in_zone ? "지정 정비구역" : r.candidate ? "재개발 환경 유사" : "환경 유사 아님";
+  const tone = r.in_zone ? "t-desig" : r.candidate ? "t-cand" : "t-none";
+  const g = simGrade(fe?.rank_top_pct);   // 높음/중간/낮음
   return (
-    <div className="facts">
-      {/* ★in_zone(실제 지정구역)≠candidate(환경 유사). '지정됨' 오독 차단. 신뢰도는 임계값 거리 기반 */}
-      <div className="row big">{(r.in_zone ? "지정 정비구역" : r.candidate ? "재개발 환경 유사(지정 아님)" : "환경 유사 아님") + (r.confidence ? `(${r.confidence})` : "")}</div>
-      {/* ★헤더도 본문과 같은 상위/하위 규칙(rank_phrase) 사용 — 헤더-본문 충돌 방지 */}
-      <div className="row">환경 점수: <b>{fe ? fe.rank_phrase : "—"}</b></div>
-      <div className="row">요건 판정: <b>{rq?.path ?? "산출 불가"}</b></div>
-      <div className="row">토허: <b>{el ? (el.toheo_applies ? "적용(갭투자 불가)" : "미적용") : "—"}</b></div>
-      <div className="muted">추정·참고치 · 투자 권유 아님</div>
+    <div className={`hero ${tone}`}>
+      <div className="hero-label">{cls}{r.confidence ? <span className="conf">{r.confidence}</span> : null}</div>
+      {r.verdict?.headline && <div className="hero-sub">{r.verdict.headline}</div>}
+      <div className="chips">
+        {/* ★방향 명시: 등급(높음/중간/낮음) + 백분위. 의미는 아래 help가 항상 설명 */}
+        <div className="chip"><span className="ck">환경 유사도</span><span className="cv" data-g={g || ""}>{g || "—"}</span><span className="csub">{fe ? fe.rank_phrase : ""}</span></div>
+        <div className="chip"><span className="ck">요건</span><span className="cv">{rq?.path ?? "산출 불가"}</span></div>
+        <div className="chip"><span className="ck">토허</span><span className="cv">{el ? (el.toheo_applies ? "적용" : "미적용") : "—"}</span></div>
+      </div>
+      <div className="hero-help">유사도 = 재개발된 동네와 노후 환경이 닮은 정도(<b>높음=닮음</b>·낮음=거리 멂). ※ 닮음 ≠ 재개발 확정</div>
     </div>
   );
 }
@@ -45,40 +73,93 @@ function Facts({ r }) {
 function ReportPanel({ r }) {
   if (!r) return <p className="muted">주소를 입력하면 5종 판단 리포트가 나옵니다.</p>;
   if (r.error) return <p style={{ color: "#c00" }}>{r.error}</p>;
+  const sections = parseSections(r.report?.report_text);
+  const facts = r.report?.source_facts || {};
   return (
-    <div>
-      <Facts r={r} />
-      <div className="report-text">{r.report?.report_text}</div>
-      {/* ★caveat 패널도 사용자 언어 번역본(report.caveats_user) — 내부코드 R##·§ 노출 금지 */}
+    <div className="report">
+      <Hero r={r} />
+      <div className="cards">
+        {sections.map((s, i) => {
+          const m = SECTION_META[s.label] || { ic: "•", sub: "" };
+          return (
+            <div key={i} className="card">
+              <div className="card-h"><span className="ic">{m.ic}</span><b>{s.label}</b><span className="card-sub">{m.sub}</span></div>
+              <div className="card-b">{s.body}</div>
+            </div>
+          );
+        })}
+      </div>
+      {/* ★출처는 화면에서 빼되 메타로 보존 — 클릭하면 표시값(키→값) 확인(정직성 장치 유지) */}
+      <details className="src">
+        <summary>출처·근거 ({Object.keys(facts).length})</summary>
+        <table className="src-t"><tbody>{Object.entries(facts).map(([k, v]) => (
+          <tr key={k}><td>{k}</td><td>{v}</td></tr>))}</tbody></table>
+      </details>
+      {/* ★caveat도 사용자 언어 번역본(caveats_user) — 내부코드 R##·§ 노출 금지, 접힘 유지 */}
       <details>
         <summary>한계·주의 ({r.report?.caveats_user?.length || 0})</summary>
         <ul>{(r.report?.caveats_user || []).map((c, i) => <li key={i}>{c}</li>)}</ul>
       </details>
+      <div className="muted">추정·참고치 · 투자 권유 아님</div>
     </div>
   );
 }
 
 function Screener({ onPick }) {
-  const [gu, setGu] = useState("11440");
-  const [minPct, setMinPct] = useState(0.9);
+  const [gu, setGu] = useState("11590");
+  const [kind, setKind] = useState("cluster");     // ★필터: 지정/후보/전체 — 점수 포화라 %밴드는 제거(no-op)
   const [items, setItems] = useState([]);
-  const run = () => fetch(`/screen?gu=${gu}&min_pct=${minPct}&top_k=30`).then((r) => r.json()).then((d) => setItems(d.results || []));
+  const [loading, setLoading] = useState(false);
+  const [ran, setRan] = useState(false);
+  const run = () => {
+    setLoading(true);
+    fetch(`/screen?gu=${gu}&kind=${kind}&top_k=30`).then((r) => r.json())
+      .then((d) => { setItems(d.results || []); setLoading(false); setRan(true); });
+  };
   return (
     <div>
       <div className="filters">
         <select value={gu} onChange={(e) => setGu(e.target.value)}>
-          <option value="11290">성북</option><option value="11590">동작</option>
-          <option value="11380">은평</option><option value="11530">구로</option>
-          <option value="11440">마포</option><option value="11680">강남</option>
+          <option value="11290">성북구</option><option value="11590">동작구</option>
+          <option value="11380">은평구</option><option value="11530">구로구</option>
+          <option value="11440">마포구</option><option value="11680">강남구</option>
         </select>
-        <input type="number" step="0.05" min="0" max="1" value={minPct} onChange={(e) => setMinPct(e.target.value)} />
+        {/* ★필터 = 카테고리(점수 포화라 %밴드는 표시리스트를 못 바꿔 제거). 정렬은 환경 유사 높은 순 */}
+        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="cluster">후보 군집</option>
+          <option value="zone">지정 정비구역</option>
+          <option value="all">전체(환경 유사 높은 순)</option>
+        </select>
         <button onClick={run}>검색</button>
       </div>
-      {items.map((it) => (
-        <div key={it.pnu} className="screen-item" onClick={() => onPick([it.lat, it.lon])}>
-          …{it.pnu.slice(-8)} · 점수 {it.score.toFixed(3)} · 상위 {(100 * (1 - it.score_pct)).toFixed(0)}%
-        </div>
-      ))}
+      {loading ? <p className="muted">검색 중…</p>
+        : !ran ? <p className="muted">구 + 환경 상위 밴드를 고르고 검색하세요.</p>
+        : items.length === 0 ? <p className="muted">해당 조건의 후보가 없습니다.</p>
+        : items.map((it) => {
+          const badge = it.in_zone ? (it.zone_name || "지정 정비구역") : it.cluster ? "후보 군집" : "관심";
+          const tone = it.in_zone ? "b-desig" : it.cluster ? "b-cand" : "b-none";
+          return (
+            <div key={it.pnu} className="screen-item" onClick={() => onPick([it.lat, it.lon])}>
+              <div className="si-top">
+                <span className="si-addr">{it.address || ("필지 …" + it.pnu.slice(-8))}</span>
+                <span className={`si-badge ${tone}`}>{badge}</span>
+              </div>
+              <div className="si-meta">재개발 환경 유사 {simGrade(it.rank_pct) || "—"} · 전 구역 상위 {it.rank_pct}%</div>
+            </div>
+          );
+        })}
+    </div>
+  );
+}
+
+// ★지도 범례 — 색 스케일 + 의미 + R18 오독 차단(유사도일 뿐 재개발 확정 아님) + 군집 설명.
+function MapLegend() {
+  return (
+    <div className="legend">
+      <div className="lg-title">색 = 재개발 환경 유사도</div>
+      <div className="lg-bar"><span>높음</span><div className="lg-grad" /><span>낮음</span></div>
+      <div className="lg-note"><b style={{ color: "#b91c1c" }}>빨강</b> = 노후 환경이 재개발된 동네와 닮음 · <b style={{ color: "#15803d" }}>초록</b> = 거리 멂</div>
+      <div className="lg-warn">※ 점 색은 필지별 노후 환경 유사도일 뿐, 재개발 확정·가능성·구역 경계가 아닙니다</div>
     </div>
   );
 }
@@ -123,7 +204,7 @@ export default function App() {
           {pos && <Marker position={pos} />}
           <FlyTo pos={pos} />
         </MapContainer>
-        <div className="legend">색 = 환경 점수 백분위 (빨강=상위)</div>
+        <MapLegend />
       </div>
     </div>
   );
