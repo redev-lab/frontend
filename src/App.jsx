@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
 import { supabase, authReady, authedFetch } from "./supabase";
+import { MapPin, Map as MapIcon, FileText, KeyRound, ShieldCheck, ArrowRight } from "lucide-react";
 
 const SEOUL = [37.55, 126.99];
 // ★색 = 재개발 환경 유사도 백분위. 빨강(높음=재개발된 동네와 닮음) → 초록(낮음=거리 멂).
@@ -217,10 +218,10 @@ function Workspace() {
 const BRAND = "재개발 투자 판단";
 const NAV = [{ id: "home", label: "소개" }, { id: "guide", label: "이용방법" }, { id: "app", label: "검색" }];
 const FEATURES = [
-  { ic: "📍", t: "주소로 환경 분석", d: "지번 하나로 그 일대의 노후 환경 유사도·재개발 요건 충족 여부를 정리해 봅니다." },
-  { ic: "🗺️", t: "지도 시각화", d: "일대 필지의 환경 점수를 색으로 표시합니다. 구역 경계가 아닌 참고용 분포입니다." },
-  { ic: "📄", t: "계획정보 근거", d: "지정 정비구역이면 용적률·세대수 등을 고시문 출처와 함께 인용합니다." },
-  { ic: "🔑", t: "진입 가능성", d: "토지거래허가 등 규제를 참고로 제시합니다. 수시 변경되니 최신 고시 확인이 필요합니다." },
+  { Icon: MapPin, t: "주소로 환경 분석", d: "지번 하나로 그 일대의 노후 환경 유사도와 재개발 요건 충족 여부를 정리해 봅니다." },
+  { Icon: MapIcon, t: "지도 시각화", d: "일대 필지의 환경 점수를 색으로 표시합니다. 구역 경계가 아닌 참고용 분포입니다." },
+  { Icon: FileText, t: "계획정보 근거", d: "지정 정비구역이면 용적률·세대수 등을 고시문 출처와 함께 인용합니다." },
+  { Icon: KeyRound, t: "진입 가능성", d: "토지거래허가 등 규제를 참고로 제시합니다. 수시 변경되니 사용 시점 고시 확인이 필요합니다." },
 ];
 
 function Header({ view, go, session, logout }) {
@@ -303,25 +304,44 @@ function AuthPage({ onAuthed, go }) {
 
 function Landing({ go }) {
   return (
-    <main className="doc landing">
+    <main className="landing">
       <section className="lp-hero">
-        <h1>주소 하나로, 그 일대의 <b>재개발 환경</b>을 읽습니다.</h1>
-        <p className="lp-sub">노후 환경·재개발 요건·계획정보·진입 규제를 데이터로 정리해 보여주는 <b>참고 도구</b>입니다.
-          재개발 여부나 수익을 확정하지 않습니다.</p>
-        <div className="lp-cta">
-          <button className="btn-primary" onClick={() => go("app")}>주소 검색 시작</button>
-          <button className="btn-ghost" onClick={() => go("guide")}>이용 방법 보기</button>
+        <div className="lp-inner">
+          <span className="lp-eyebrow">데이터 기반 · 참고용 분석</span>
+          <h1>주소 하나로,<br />그 일대의 <b>재개발 환경</b>을 읽습니다.</h1>
+          <p className="lp-sub">노후 환경·재개발 요건·계획정보·진입 규제를 데이터로 정리해 보여주는 참고 도구입니다.
+            재개발 여부나 수익을 확정하지 않습니다.</p>
+          <div className="lp-cta">
+            <button className="btn-primary" onClick={() => go("app")}>주소 검색 시작 <ArrowRight size={17} strokeWidth={2.2} /></button>
+            <button className="btn-ghost" onClick={() => go("guide")}>이용 방법 보기</button>
+          </div>
         </div>
       </section>
-      <section className="lp-feat">
-        {FEATURES.map((f) => (
-          <div key={f.t} className="feat"><div className="feat-ic">{f.ic}</div><h3>{f.t}</h3><p>{f.d}</p></div>
-        ))}
+      <section className="lp-feat-wrap">
+        <div className="lp-inner">
+          <div className="lp-feat">
+            {FEATURES.map((f) => (
+              <div key={f.t} className="feat">
+                <div className="feat-ic"><f.Icon size={22} strokeWidth={1.75} /></div>
+                <h3>{f.t}</h3>
+                <p>{f.d}</p>
+              </div>
+            ))}
+          </div>
+        </div>
       </section>
-      <section className="lp-honest">
-        <h3>이 서비스가 하지 않는 것</h3>
-        <p>재개발 확정·미래 가격·정확한 수익률을 단정하지 않습니다. 모든 수치는 추정·참고치이며, 투자 결정과 책임은
-          이용자 본인에게 있습니다. 데이터 한계(학습 지역 외 상세 미제공, 라벨 커버리지 등)는 결과 화면에 명시합니다.</p>
+      <section className="lp-honest-wrap">
+        <div className="lp-inner">
+          <div className="lp-honest">
+            <div className="honest-ic"><ShieldCheck size={22} strokeWidth={1.75} /></div>
+            <div>
+              <h3>이 서비스가 하지 않는 것</h3>
+              <p>재개발 확정·미래 가격·정확한 수익률을 단정하지 않습니다. 모든 수치는 추정·참고치이며, 투자 결정과
+                책임은 이용자 본인에게 있습니다. 데이터 한계(학습 지역 외 상세 미제공, 라벨 커버리지 등)는 결과 화면에
+                명시합니다.</p>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
   );
