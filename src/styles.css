@@ -21,6 +21,25 @@ h1, h2, h3 { color: var(--navy); letter-spacing: -.3px; }
 .site-nav button { background: transparent; border: 0; color: #c7d6e6; font-size: 13.5px; padding: 7px 13px; border-radius: 8px; cursor: pointer; }
 .site-nav button:hover { color: #fff; background: rgba(255,255,255,.08); }
 .site-nav button.on { color: #fff; background: rgba(255,255,255,.14); font-weight: 700; }
+.h-right { display: flex; align-items: center; gap: 10px; }
+.auth-btn { background: transparent; border: 1px solid rgba(255,255,255,.3); color: #fff; font-size: 13px; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+.auth-btn:hover { background: rgba(255,255,255,.1); }
+.auth-btn.solid { background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.auth-btn.solid:hover { background: #1d4ed8; }
+
+/* 인증 카드 */
+.auth { display: flex; justify-content: center; }
+.auth-card { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 26px; margin-top: 24px; box-shadow: 0 2px 10px rgba(15,41,66,.06); }
+.auth-card h1 { font-size: 22px; margin: 0 0 6px; }
+.auth-sub { font-size: 13px; color: var(--muted); margin: 0 0 18px; }
+.auth-card input[type=email], .auth-card input[type=password] { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; font-size: 14px; margin-bottom: 10px; }
+.auth-card input:focus { outline: none; border-color: var(--accent); }
+.auth-card .btn-primary { width: 100%; margin-top: 4px; }
+.auth-agree { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: #475569; line-height: 1.5; margin-bottom: 12px; }
+.auth-agree a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+.auth-msg { margin-top: 12px; font-size: 13px; color: #334155; background: #f1f5f9; border-radius: 8px; padding: 10px 12px; line-height: 1.5; }
+.auth-switch { display: flex; gap: 14px; justify-content: center; margin-top: 16px; }
+.auth-switch button { background: none; border: 0; color: var(--accent); font-size: 12.5px; cursor: pointer; }
 
 /* 문서형 페이지(랜딩·이용방법·법적) — 중앙 정렬, 넉넉한 여백 */
 .doc { max-width: var(--maxw); margin: 0 auto; padding: 44px 24px 64px; width: 100%; flex: 1; }

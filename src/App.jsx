@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
+import { supabase, authReady, authedFetch } from "./supabase";
 
 const SEOUL = [37.55, 126.99];
 // ★색 = 재개발 환경 유사도 백분위. 빨강(높음=재개발된 동네와 닮음) → 초록(낮음=거리 멂).
@@ -116,7 +117,7 @@ function Screener({ onPick }) {
   const [ran, setRan] = useState(false);
   const run = () => {
     setLoading(true);
-    fetch(`/screen?gu=${gu}&kind=${kind}&top_k=30`).then((r) => r.json())
+    authedFetch(`/screen?gu=${gu}&kind=${kind}&top_k=30`).then((r) => r.json())
       .then((d) => { setItems(d.results || []); setLoading(false); setRan(true); });
   };
   return (
@@ -176,7 +177,7 @@ function Workspace() {
   const search = () => {
     setReport({ loading: true });
     /* ★stage 하드코딩 금지(누수 경로) — 실제 단계를 모르면 보내지 않는다. in_zone+stage일 때만 '언제' 출력 */
-    fetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: addr, property_type: "다세대" }) })
+    authedFetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: addr, property_type: "다세대" }) })
       .then((r) => r.json())
       .then((r) => { setReport(r); if (r.lat) setPos([r.lat, r.lon]); })
       .catch((e) => setReport({ error: String(e) }));
@@ -222,7 +223,7 @@ const FEATURES = [
   { ic: "🔑", t: "진입 가능성", d: "토지거래허가 등 규제를 참고로 제시합니다. 수시 변경되니 최신 고시 확인이 필요합니다." },
 ];
 
-function Header({ view, go }) {
+function Header({ view, go, session, logout }) {
   return (
     <header className="site-h">
       <div className="brand" onClick={() => go("home")} role="button">
@@ -230,10 +231,73 @@ function Header({ view, go }) {
         <span className="brand-name">{BRAND}</span>
         <span className="brand-tag">데이터 기반 재개발 환경 분석</span>
       </div>
-      <nav className="site-nav">
-        {NAV.map((n) => <button key={n.id} className={view === n.id ? "on" : ""} onClick={() => go(n.id)}>{n.label}</button>)}
-      </nav>
+      <div className="h-right">
+        <nav className="site-nav">
+          {NAV.map((n) => <button key={n.id} className={view === n.id ? "on" : ""} onClick={() => go(n.id)}>{n.label}</button>)}
+        </nav>
+        {session
+          ? <button className="auth-btn" onClick={logout} title={session.user?.email}>로그아웃</button>
+          : <button className="auth-btn solid" onClick={() => go("app")}>로그인</button>}
+      </div>
     </header>
+  );
+}
+
+// ★가입 필수 게이트 — 로그인/회원가입/비번재설정. 회원가입엔 개인정보 동의 필수.
+function AuthPage({ onAuthed, go }) {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [agree, setAgree] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  if (!authReady) return (
+    <main className="doc"><div className="legal-banner">인증이 아직 설정되지 않았습니다 — <b>.env</b>의
+      <code> VITE_SUPABASE_URL</code>·<code>VITE_SUPABASE_ANON_KEY</code>를 넣고 재기동하세요(Supabase 셋업 후).</div></main>
+  );
+  const submit = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      if (mode === "signup") {
+        if (!agree) { setMsg("개인정보(이메일) 수집·이용에 동의해야 가입할 수 있습니다."); setBusy(false); return; }
+        const { error } = await supabase.auth.signUp({ email, password: pw });
+        if (error) throw error;
+        setMsg("확인 메일을 보냈습니다 — 메일의 링크로 인증 후 로그인하세요.");
+      } else if (mode === "login") {
+        const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
+        if (error) throw error;
+        onAuthed && onAuthed();
+      } else {
+        const { error } = await supabase.auth.resetPasswordForEmail(email);
+        if (error) throw error;
+        setMsg("비밀번호 재설정 메일을 보냈습니다.");
+      }
+    } catch (e) { setMsg(e.message || String(e)); }
+    setBusy(false);
+  };
+  const title = mode === "signup" ? "회원가입" : mode === "reset" ? "비밀번호 재설정" : "로그인";
+  return (
+    <main className="doc auth">
+      <div className="auth-card">
+        <h1>{title}</h1>
+        <p className="auth-sub">검색·결과·스크리너는 <b>회원만</b> 이용할 수 있습니다.</p>
+        <input type="email" placeholder="이메일" value={email} onChange={(e) => setEmail(e.target.value)} />
+        {mode !== "reset" && <input type="password" placeholder="비밀번호 (6자 이상)" value={pw} onChange={(e) => setPw(e.target.value)} />}
+        {mode === "signup" && (
+          <label className="auth-agree">
+            <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
+            <span>[필수] 개인정보(이메일) 수집·이용 동의 — <a onClick={() => go("privacy")}>개인정보처리방침</a> · <a onClick={() => go("disclaimer")}>면책</a> (초안)</span>
+          </label>
+        )}
+        <button className="btn-primary" disabled={busy} onClick={submit}>{busy ? "처리 중…" : title}</button>
+        {msg && <div className="auth-msg">{msg}</div>}
+        <div className="auth-switch">
+          {mode !== "login" && <button onClick={() => { setMode("login"); setMsg(null); }}>로그인</button>}
+          {mode !== "signup" && <button onClick={() => { setMode("signup"); setMsg(null); }}>회원가입</button>}
+          {mode !== "reset" && <button onClick={() => { setMode("reset"); setMsg(null); }}>비밀번호 찾기</button>}
+        </div>
+      </div>
+    </main>
   );
 }
 
@@ -328,21 +392,33 @@ function Footer({ go }) {
 
 export default function App() {
   const [view, setView] = useState(() => window.location.hash.replace("#", "") || "home");
+  const [session, setSession] = useState(null);
   useEffect(() => {
     const on = () => setView(window.location.hash.replace("#", "") || "home");
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
+  useEffect(() => {                                    // ★Supabase 세션 구독
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
   const go = (v) => { window.location.hash = v; setView(v); window.scrollTo(0, 0); };
-  const body = view === "app" ? <Workspace />
+  const logout = async () => { if (supabase) await supabase.auth.signOut(); go("home"); };
+
+  const needAuth = view === "app" && !session;        // ★게이트: 검색은 로그인 필수
+  const body = needAuth ? <AuthPage onAuthed={() => go("app")} go={go} />
+    : view === "app" ? <Workspace />
     : view === "guide" ? <Guide go={go} />
     : ["terms", "privacy", "disclaimer"].includes(view) ? <Legal kind={view} />
     : <Landing go={go} />;
+  const fullApp = view === "app" && !needAuth;        // 풀높이 지도 레이아웃은 로그인 후에만
   return (
-    <div className={`site ${view === "app" ? "is-app" : ""}`}>
-      <Header view={view} go={go} />
+    <div className={`site ${fullApp ? "is-app" : ""}`}>
+      <Header view={view} go={go} session={session} logout={logout} />
       {body}
-      {view !== "app" && <Footer go={go} />}
+      {!fullApp && <Footer go={go} />}
     </div>
   );
 }
