@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
 
 const SEOUL = [37.55, 126.99];
@@ -167,7 +167,8 @@ function MapLegend() {
   );
 }
 
-export default function App() {
+// ───────── 기능 페이지(검색·스크리너·지도) — 기존 기능 그대로, 사이트 안으로 편입 ─────────
+function Workspace() {
   const [tab, setTab] = useState("search");
   const [addr, setAddr] = useState("성북구 정릉동 170-1");
   const [report, setReport] = useState(null);
@@ -183,7 +184,6 @@ export default function App() {
   return (
     <div className="app">
       <div className="panel">
-        <h2>재개발 투자 판단</h2>
         <div className="tabs">
           <button className={tab === "search" ? "active" : ""} onClick={() => setTab("search")}>주소 검색</button>
           <button className={tab === "screener" ? "active" : ""} onClick={() => setTab("screener")}>스크리너</button>
@@ -192,7 +192,7 @@ export default function App() {
           <>
             <div className="search">
               <input value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="지번 주소 (예: 성북구 정릉동 170-1)" />
-              <button onClick={search}>판단</button>
+              <button onClick={search}>분석</button>
             </div>
             {report?.loading ? <p className="muted">분석 중…</p> : <ReportPanel r={report} />}
           </>
@@ -209,6 +209,140 @@ export default function App() {
         </MapContainer>
         <MapLegend />
       </div>
+    </div>
+  );
+}
+
+const BRAND = "재개발 투자 판단";
+const NAV = [{ id: "home", label: "소개" }, { id: "guide", label: "이용방법" }, { id: "app", label: "검색" }];
+const FEATURES = [
+  { ic: "📍", t: "주소로 환경 분석", d: "지번 하나로 그 일대의 노후 환경 유사도·재개발 요건 충족 여부를 정리해 봅니다." },
+  { ic: "🗺️", t: "지도 시각화", d: "일대 필지의 환경 점수를 색으로 표시합니다. 구역 경계가 아닌 참고용 분포입니다." },
+  { ic: "📄", t: "계획정보 근거", d: "지정 정비구역이면 용적률·세대수 등을 고시문 출처와 함께 인용합니다." },
+  { ic: "🔑", t: "진입 가능성", d: "토지거래허가 등 규제를 참고로 제시합니다. 수시 변경되니 최신 고시 확인이 필요합니다." },
+];
+
+function Header({ view, go }) {
+  return (
+    <header className="site-h">
+      <div className="brand" onClick={() => go("home")} role="button">
+        <span className="logo">▦</span>
+        <span className="brand-name">{BRAND}</span>
+        <span className="brand-tag">데이터 기반 재개발 환경 분석</span>
+      </div>
+      <nav className="site-nav">
+        {NAV.map((n) => <button key={n.id} className={view === n.id ? "on" : ""} onClick={() => go(n.id)}>{n.label}</button>)}
+      </nav>
+    </header>
+  );
+}
+
+function Landing({ go }) {
+  return (
+    <main className="doc landing">
+      <section className="lp-hero">
+        <h1>주소 하나로, 그 일대의 <b>재개발 환경</b>을 읽습니다.</h1>
+        <p className="lp-sub">노후 환경·재개발 요건·계획정보·진입 규제를 데이터로 정리해 보여주는 <b>참고 도구</b>입니다.
+          재개발 여부나 수익을 확정하지 않습니다.</p>
+        <div className="lp-cta">
+          <button className="btn-primary" onClick={() => go("app")}>주소 검색 시작</button>
+          <button className="btn-ghost" onClick={() => go("guide")}>이용 방법 보기</button>
+        </div>
+      </section>
+      <section className="lp-feat">
+        {FEATURES.map((f) => (
+          <div key={f.t} className="feat"><div className="feat-ic">{f.ic}</div><h3>{f.t}</h3><p>{f.d}</p></div>
+        ))}
+      </section>
+      <section className="lp-honest">
+        <h3>이 서비스가 하지 않는 것</h3>
+        <p>재개발 확정·미래 가격·정확한 수익률을 단정하지 않습니다. 모든 수치는 추정·참고치이며, 투자 결정과 책임은
+          이용자 본인에게 있습니다. 데이터 한계(학습 지역 외 상세 미제공, 라벨 커버리지 등)는 결과 화면에 명시합니다.</p>
+      </section>
+    </main>
+  );
+}
+
+function Guide({ go }) {
+  const steps = [
+    ["주소 입력", "검색 화면에 지번 주소를 입력합니다 (예: 성북구 정릉동 170-1). 도로명은 현재 미지원입니다."],
+    ["환경 점수·판정 확인", "상단 카드에서 지정 정비구역 / 환경 유사 후보 / 대상 아님 판정과 '재개발 환경 유사도'(높음·중간·낮음)를 봅니다. 유사도는 '닮은 정도'일 뿐 재개발 확정이 아닙니다."],
+    ["상세 읽기", "될까·얼마·언제·리스크·진입 5개 항목을 카드로 봅니다. 모두 추정·참고치이며, 출처는 '출처·근거'에서 확인할 수 있습니다."],
+    ["지도·스크리너", "지도는 일대 환경 점수를 색으로, 스크리너는 구별 후보/지정 구역 리스트를 보여줍니다."],
+  ];
+  return (
+    <main className="doc">
+      <h1>이용 방법</h1>
+      <ol className="guide">
+        {steps.map(([t, d], i) => <li key={i}><b>{t}</b><p>{d}</p></li>)}
+      </ol>
+      <div className="note-box">학습 지역(7개 구) 밖 주소는 환경 점수·판정만 제공하고 시세·노후도 등 상세는 제공하지 않습니다(결과 화면에 표시).</div>
+      <button className="btn-primary" onClick={() => go("app")}>검색하러 가기</button>
+    </main>
+  );
+}
+
+const LEGAL = {
+  terms: { title: "이용약관", secs: ["목적", "정의", "서비스의 내용", "이용자의 의무", "서비스 이용 제한", "면책 조항", "지식재산권", "약관의 변경", "준거법 및 관할"] },
+  privacy: { title: "개인정보처리방침", secs: ["수집하는 개인정보 항목", "수집 및 이용 목적", "보유 및 이용 기간", "제3자 제공", "처리 위탁", "이용자의 권리와 행사 방법", "개인정보 보호책임자 및 문의처"] },
+  disclaimer: { title: "면책 고지", secs: ["서비스의 성격", "데이터의 한계", "투자 책임의 귀속"] },
+};
+
+function Legal({ kind }) {
+  const L = LEGAL[kind] || LEGAL.terms;
+  return (
+    <main className="doc legal">
+      <h1>{L.title}</h1>
+      <div className="legal-banner">⚠️ 본 문서는 <b>초안 골격</b>이며, 정식 서비스 전 <b>법무 검토·표준양식 적용 예정</b>입니다.
+        현재는 섹션 구성만 표시하며 확정된 법적 효력이 없습니다.</div>
+      {kind === "disclaimer" && (
+        <p className="legal-core">본 서비스는 <b>투자 자문이 아니라 데이터 기반 참고 정보</b>를 제공합니다. 제공되는 점수·판정·
+          계획정보·시세 맥락은 모두 추정·참고치이며 재개발 여부나 수익을 보장하지 않습니다. <b>투자 결정과 그 결과에
+          대한 책임은 전적으로 이용자 본인에게 있습니다.</b></p>
+      )}
+      <ol className="legal-secs">
+        {L.secs.map((s, i) => <li key={i}><b>{s}</b><span className="legal-ph">[검토 전 — 내용 미작성]</span></li>)}
+      </ol>
+    </main>
+  );
+}
+
+function Footer({ go }) {
+  return (
+    <footer className="site-f">
+      <div className="f-row">
+        <div className="f-brand">{BRAND}<span> · 데이터 기반 재개발 환경 분석(참고용)</span></div>
+        <nav className="f-nav">
+          <button onClick={() => go("home")}>소개</button>
+          <button onClick={() => go("guide")}>이용방법</button>
+          <button onClick={() => go("terms")}>이용약관</button>
+          <button onClick={() => go("privacy")}>개인정보처리방침</button>
+          <button onClick={() => go("disclaimer")}>면책</button>
+        </nav>
+      </div>
+      <div className="f-disc">본 서비스는 투자 권유가 아니며, 모든 수치는 추정·참고치입니다. 투자 결정은 이용자 본인 책임입니다.
+        · 데이터 출처: 국토교통부·서울특별시 공공데이터(출처표시).</div>
+    </footer>
+  );
+}
+
+export default function App() {
+  const [view, setView] = useState(() => window.location.hash.replace("#", "") || "home");
+  useEffect(() => {
+    const on = () => setView(window.location.hash.replace("#", "") || "home");
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  const go = (v) => { window.location.hash = v; setView(v); window.scrollTo(0, 0); };
+  const body = view === "app" ? <Workspace />
+    : view === "guide" ? <Guide go={go} />
+    : ["terms", "privacy", "disclaimer"].includes(view) ? <Legal kind={view} />
+    : <Landing go={go} />;
+  return (
+    <div className={`site ${view === "app" ? "is-app" : ""}`}>
+      <Header view={view} go={go} />
+      {body}
+      {view !== "app" && <Footer go={go} />}
     </div>
   );
 }
