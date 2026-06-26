@@ -13,11 +13,18 @@ const simGrade = (pct) => (pct == null ? null : pct <= 33 ? "높음" : pct <= 66
 // ★군집 외곽선(점선)은 제거 — 볼록껍질이 도로·공원을 가로질러 '재개발 구역 경계'로 오독 위험(근거 약함).
 function BboxLayer() {
   const [pts, setPts] = useState([]);
-  const fetchBbox = (map) => {
+  const fetchBbox = async (map) => {
     const b = map.getBounds();
     const q = `west=${b.getWest()}&south=${b.getSouth()}&east=${b.getEast()}&north=${b.getNorth()}&limit=1500`;
     if (map.getZoom() < 13) { setPts([]); return; } // 줌 낮으면 생략(통짜 렌더 금지)
-    fetch(`/screen/bbox?${q}`).then((r) => r.json()).then((d) => setPts(d.results || []));
+    // ★/report·/screen과 동일하게 authedFetch로 Bearer 토큰 부착(401 해소).
+    // authedFetch엔 공통 401 처리가 없어 — 토큰 만료 등으로 401/실패 시 조용히 색점만 미표시(앱 안 죽게).
+    try {
+      const r = await authedFetch(`/screen/bbox?${q}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      setPts(d.results || []);
+    } catch { /* 네트워크·인증 실패 — 무시 */ }
   };
   const map = useMapEvents({ moveend: () => fetchBbox(map) });
   // 줌아웃 시 백엔드가 점수 무관 균등 샘플로 솎음(분포 보존) → 색 인상 줌 일관. 각 점=필지 환경 유사도.
@@ -49,58 +56,119 @@ function parseSections(text) {
   });
 }
 
-// ★상단 히어로 — 한 줄 결론 + 핵심 3칩. in_zone(지정)≠candidate(환경유사) 구분, 신뢰도 병기.
-function Hero({ r }) {
-  const fe = r.stages?.["예언_환경점수"]?.result;
-  const rq = r.stages?.["진단_요건"]?.result;
-  const el = r.stages?.["진입_eligibility"]?.result?.["진단_토허"];
-  const cls = r.in_zone ? "지정 정비구역" : r.candidate ? "재개발 환경 유사" : "환경 유사 아님";
-  const tone = r.in_zone ? "t-desig" : r.candidate ? "t-cand" : "t-none";
-  const g = simGrade(fe?.rank_top_pct);   // 높음/중간/낮음
+const stripYear = (s) => (s || "").replace(/\s*\(\d{4}\)\s*$/, "").trim();   // 이름 끝 " (2009)" 제거(t와 중복)
+const statusText = (m) => (m.t ? `${m.t}년 지정` : "");   // ★진행상태(completed) 미표시 — 신뢰도 불확실. 지정연도(t)만.
+
+// ★히어로 — "닮은 재개발 동네"(우리 강점, 최상위). r.retrieval.matches.
+function SimilarHero({ matches }) {
+  const [top, ...rest] = matches;
   return (
-    <div className={`hero ${tone}`}>
-      <div className="hero-label">{cls}{r.confidence ? <span className="conf">{r.confidence}</span> : null}</div>
-      {r.verdict?.headline && <div className="hero-sub">{r.verdict.headline}</div>}
-      <div className="chips">
-        {/* ★방향 명시: 등급(높음/중간/낮음) + 백분위. 의미는 아래 help가 항상 설명 */}
-        <div className="chip"><span className="ck">환경 유사도</span><span className="cv" data-g={g || ""}>{g || "—"}</span><span className="csub">{fe ? fe.rank_phrase : ""}</span></div>
-        <div className="chip"><span className="ck">요건</span><span className="cv">{rq?.path ?? "산출 불가"}</span></div>
-        <div className="chip"><span className="ck">토허</span><span className="cv">{el ? (el.toheo_applies ? "적용" : "미적용") : "—"}</span></div>
+    <section className="sim">
+      <h2 className="sim-title">이 동네는 재개발로 진행된 동네와 닮았습니다</h2>
+      <div className="sim-top">
+        <div className="sim-pct">{Math.round(top.similarity * 100)}<small>%</small></div>
+        <div className="sim-top-i">
+          <div className="sim-name">{stripYear(top.display_name)}</div>
+          {statusText(top) && <span className="sim-status">{statusText(top)}</span>}
+        </div>
       </div>
-      <div className="hero-help">유사도 = 재개발된 동네와 노후 환경이 닮은 정도(<b>높음=닮음</b>·낮음=거리 멂). ※ 닮음 ≠ 재개발 확정</div>
-    </div>
+      {rest.length > 0 && (
+        <div className="sim-rest">
+          {rest.map((m, i) => (
+            <div key={i} className="sim-card">
+              <div className="sim-name-s">{stripYear(m.display_name)}</div>
+              <div className="sim-meta-s">{Math.round(m.similarity * 100)}% 닮음{statusText(m) ? ` · ${statusText(m)}` : ""}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="sim-disc">재개발이 진행된 실제 동네와 얼마나 닮았는지를 보여줍니다. 닮음이 곧 재개발 확정은 아닙니다.</p>
+    </section>
   );
 }
 
+// 왜 닮았나 — top_similar_axes에 든 축만 + query_metrics 입력값(매치 수치는 API에 없음 → 비교 안 함).
+const _AXIS = { "노후도": ["old_area_ratio", "%", 100], "면적": ["area_ha", "ha", 1], "호수밀도": ["house_density", "", 1], "접도율": ["abut_ratio", "%", 100] };
+function WhySimilar({ retrieval }) {
+  const axes = retrieval?.matches?.[0]?.top_similar_axes || [];
+  const qm = retrieval?.query_metrics || {};
+  const parts = axes.map((ax) => {
+    const m = _AXIS[ax]; if (!m) return null;
+    const v = qm[m[0]]; if (v == null) return ax;
+    const val = m[2] === 100 ? Math.round(v * 100) : Math.round(v);
+    return `${ax}(${val}${m[1]})`;                       // "노후도(100%)"
+  }).filter(Boolean);
+  if (!parts.length) return null;
+  return (
+    <section className="why">
+      <h3>왜 닮았나</h3>
+      <p>가장 닮은 점은 {parts.join(", ")}입니다.</p>
+    </section>
+  );
+}
+
+// 폴백 — 닮은 동네 없을 때(정직). kind: none(비후보) | partial(7구 밖).
+function Fallback({ kind, fe, note }) {
+  return (
+    <section className="fb">
+      {kind === "partial"
+        ? <><h2 className="fb-title">이 주소는 아직 정밀 분석 범위 밖입니다</h2>
+            <p className="fb-sub">현재 서울 7개 구만 지원합니다. {note ? "" : "지정 여부·상세는 제공되지 않습니다."}</p></>
+        : <><h2 className="fb-title">최근 재개발로 진행된 동네와 뚜렷이 닮은 곳이 없습니다</h2>
+            <p className="fb-sub">이 동네는 재개발이 진행된 실제 사례와의 유사도가 낮습니다.</p></>}
+      {fe && <div className="score-line"><span className="sl-env">재개발 환경 유사도 {simGrade(fe.rank_top_pct) || "—"} · {fe.rank_phrase}</span></div>}
+    </section>
+  );
+}
+
+// 리스크 본문에서 유사사례 문장 제거(히어로로 이동) — 프론트 후처리.
+const stripSimilar = (b) => b
+  .replace(/[^.·\n]*유사[^.·\n]*%[^.·\n]*[.·]?/g, "")
+  .replace(/유사사례[^.·\n]*[.·]?/g, "")
+  .replace(/\s{2,}/g, " ").replace(/^[·.\s]+/, "").trim();
+
 function ReportPanel({ r }) {
-  if (!r) return <p className="muted">주소를 입력하면 5종 판단 리포트가 나옵니다.</p>;
+  if (!r) return <p className="muted">주소를 입력하면 닮은 재개발 동네 분석이 나옵니다.</p>;
   if (r.error) return <p style={{ color: "#c00" }}>{r.error}</p>;
-  const partial = r.scope === "global_partial";   // ★7구 밖 — 환경 점수·판정만(상세 미제공)
-  const sections = parseSections(r.report?.report_text);
+  const partial = r.scope === "global_partial";
+  const matches = r.retrieval?.matches || [];
+  const fe = r.stages?.["예언_환경점수"]?.result;
   const facts = r.report?.source_facts || {};
+  const sections = parseSections(r.report?.report_text)
+    .map((s) => (s.label === "리스크" ? { ...s, body: stripSimilar(s.body) } : s))
+    .filter((s) => s.body);                              // 유사사례만 있던 리스크는 비면 제거
   return (
     <div className="report">
-      <Hero r={r} />
-      {/* ★7구 밖 정직 고지 — '왜 시세 없냐' 오해 + 점수 과신 방지 */}
-      {partial && <div className="partial-note">ℹ️ {r.report?.partial_note}</div>}
-      {sections.length > 0 && <div className="cards">
-        {sections.map((s, i) => {
-          const m = SECTION_META[s.label] || { ic: "•", sub: "" };
-          return (
-            <div key={i} className="card">
-              <div className="card-h"><span className="ic">{m.ic}</span><b>{s.label}</b><span className="card-sub">{m.sub}</span></div>
-              <div className="card-b">{s.body}</div>
-            </div>
-          );
-        })}
-      </div>}
-      {/* ★출처는 화면에서 빼되 메타로 보존 — 클릭하면 표시값(키→값) 확인(정직성 장치 유지) */}
+      {/* 히어로: 닮은 동네 / 폴백 */}
+      {partial ? <Fallback kind="partial" note={r.report?.partial_note} />
+        : matches.length ? <><SimilarHero matches={matches} /><WhySimilar retrieval={r.retrieval} /></>
+        : <Fallback kind="none" fe={fe} />}
+      {partial && r.report?.partial_note && <div className="partial-note">ℹ️ {r.report.partial_note}</div>}
+
+      {/* 부가 — 5종 상세, 접기 가능 */}
+      {sections.length > 0 && (
+        <details className="extra" open>
+          <summary>상세 분석 (될까 · 얼마 · 언제 · 리스크 · 진입)</summary>
+          <div className="cards">
+            {sections.map((s, i) => {
+              const m = SECTION_META[s.label] || { ic: "•", sub: "" };
+              return (
+                <div key={i} className="card">
+                  <div className="card-h"><span className="ic">{m.ic}</span><b>{s.label}</b><span className="card-sub">{m.sub}</span></div>
+                  <div className="card-b">{s.body}</div>
+                  {/* 환경점수는 96%(닮음)와 안 싸우게 '전체 기준' 명시, '될까'에 작게 */}
+                  {s.label === "될까" && fe && <div className="card-env">서울 전체 기준 재개발 유사 환경: {fe.rank_phrase}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </details>
+      )}
       {Object.keys(facts).length > 0 && <details className="src">
         <summary>출처·근거 ({Object.keys(facts).length})</summary>
         <table className="src-t"><tbody>{Object.entries(facts).map(([k, v]) => (
           <tr key={k}><td>{k}</td><td>{v}</td></tr>))}</tbody></table>
       </details>}
-      {/* ★caveat도 사용자 언어 번역본(caveats_user) — 내부코드 R##·§ 노출 금지, 접힘 유지 */}
       <details>
         <summary>한계·주의 ({r.report?.caveats_user?.length || 0})</summary>
         <ul>{(r.report?.caveats_user || []).map((c, i) => <li key={i}>{c}</li>)}</ul>
