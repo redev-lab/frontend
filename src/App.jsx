@@ -812,14 +812,36 @@ const isEdited = (p) => p.created_at && p.updated_at && (new Date(p.updated_at) 
 // ───────── 게시판 목록 — 읽기 공개(비로그인도 열람). 작성/상세는 다음 단계 ─────────
 function BoardList({ session, go }) {
   const [posts, setPosts] = useState(null);            // null=로딩
+  const [best, setBest] = useState([]);                // 최근 7일 좋아요순 Top3(board_best RPC)
   const [err, setErr] = useState(null);
   useEffect(() => {
     let alive = true;
     if (!supabase) { setPosts([]); return; }
-    supabase.from("posts").select("id,title,author_nick,created_at,updated_at,comments(count)").order("created_at", { ascending: false })
+    supabase.from("posts").select("id,title,author_nick,created_at,updated_at,comments(count),post_likes(count)").order("created_at", { ascending: false })
       .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setPosts(data || []); });
+    supabase.rpc("board_best", { days: 7, lim: 3 })    // 실패해도 목록은 정상(Best만 생략)
+      .then(({ data }) => { if (alive && Array.isArray(data)) setBest(data); });
     return () => { alive = false; };
   }, []);
+  const MEDALS = ["🥇", "🥈", "🥉"];
+  const bestIds = new Set(best.map((b) => b.id));
+  const rest = (posts || []).filter((p) => !bestIds.has(p.id));   // ★Best는 위 고정만 — 아래 목록서 제외
+  // medal: Best 행이면 메달+7일 좋아요수, 일반 행이면 전체 좋아요/댓글 수
+  const renderRow = (p, medal) => (
+    <li key={p.id} className="board-item" onClick={() => go(`board/${p.id}`)} role="button">
+      <div className="bi-title">{medal && <span className="bi-medal">{medal}</span>}{p.title}{isEdited(p) && <span className="bi-edited">수정됨</span>}</div>
+      <div className="bi-meta">
+        <span className="bi-author">{p.author_nick || "익명"}</span>
+        <span className="bi-date">{(p.created_at || "").slice(0, 10)}</span>
+        {medal
+          ? (p.like_count > 0 && <span className="bi-like">♥ {p.like_count}</span>)
+          : (<>
+              {p.post_likes?.[0]?.count > 0 && <span className="bi-like">♥ {p.post_likes[0].count}</span>}
+              {p.comments?.[0]?.count > 0 && <span className="bi-cmt">💬 {p.comments[0].count}</span>}
+            </>)}
+      </div>
+    </li>
+  );
   return (
     <main className="board">
       <div className="board-head">
@@ -830,18 +852,15 @@ function BoardList({ session, go }) {
       {posts === null ? <p className="muted">불러오는 중…</p>
         : posts.length === 0 ? <p className="muted">아직 글이 없습니다.</p>
         : (
-          <ul className="board-list">
-            {posts.map((p) => (
-              <li key={p.id} className="board-item" onClick={() => go(`board/${p.id}`)} role="button">
-                <div className="bi-title">{p.title}{isEdited(p) && <span className="bi-edited">수정됨</span>}</div>
-                <div className="bi-meta">
-                  <span className="bi-author">{p.author_nick || "익명"}</span>
-                  <span className="bi-date">{(p.created_at || "").slice(0, 10)}</span>
-                  {p.comments?.[0]?.count > 0 && <span className="bi-cmt">💬 {p.comments[0].count}</span>}
-                </div>
-              </li>
-            ))}
-          </ul>
+          <>
+            {best.length > 0 && (
+              <section className="board-best">
+                <h2 className="board-best-h">🔥 이주의 Best</h2>
+                <ul className="board-list">{best.map((p, i) => renderRow(p, MEDALS[i]))}</ul>
+              </section>
+            )}
+            <ul className="board-list">{rest.map((p) => renderRow(p, null))}</ul>
+          </>
         )}
     </main>
   );
@@ -900,6 +919,48 @@ function BoardWrite({ session, nick, go }) {
         </div>
       </div>
     </main>
+  );
+}
+
+// 좋아요 버튼 — 토글(insert/delete), UNIQUE(user_id,post_id)로 중복 차단. 비로그인은 로그인 유도.
+function LikeButton({ postId, session, go }) {
+  const uid = session?.user?.id;
+  const [count, setCount] = useState(null);
+  const [liked, setLiked] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    if (!supabase) { setCount(0); return; }
+    supabase.from("post_likes").select("id", { count: "exact", head: true }).eq("post_id", postId)
+      .then(({ count, error }) => { if (alive && !error) setCount(count || 0); });
+    if (uid) {
+      supabase.from("post_likes").select("id").eq("post_id", postId).eq("user_id", uid).maybeSingle()
+        .then(({ data }) => { if (alive) setLiked(Boolean(data)); });
+    } else setLiked(false);
+    return () => { alive = false; };
+  }, [postId, uid]);
+  const toggle = async () => {
+    if (!uid) { go("app"); return; }                   // 비로그인 → 로그인 유도
+    if (busy) return;
+    setBusy(true);
+    if (liked) {
+      const { error } = await supabase.from("post_likes").delete().eq("post_id", postId).eq("user_id", uid);
+      if (!error) { setLiked(false); setCount((c) => Math.max(0, (c || 0) - 1)); }
+    } else {
+      const { error } = await supabase.from("post_likes").insert({ post_id: postId });   // user_id=default auth.uid()
+      if (!error) { setLiked(true); setCount((c) => (c || 0) + 1); }
+      else if (error.code === "23505") setLiked(true);  // 이미 눌렀음(레이스) — UNIQUE
+    }
+    setBusy(false);
+  };
+  return (
+    <div className="like-bar">
+      <button className={`like-btn${liked ? " on" : ""}`} onClick={toggle} disabled={busy}
+        aria-pressed={liked} title={uid ? (liked ? "좋아요 취소" : "좋아요") : "로그인 후 좋아요"}>
+        <Heart size={18} fill={liked ? "currentColor" : "none"} />
+        <span>{count == null ? "" : count}</span>
+      </button>
+    </div>
   );
 }
 
@@ -972,6 +1033,7 @@ function BoardDetail({ id, session, go }) {
         </div>
         {err && <p className="fav-err">{err}</p>}
         <div className="bd-body">{post.body}</div>
+        <LikeButton postId={id} session={session} go={go} />
         {mine && (
           <div className="bd-actions">
             <button className="btn-ghost" onClick={startEdit} disabled={busy}>수정</button>
