@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
 import { supabase, authReady, authedFetch } from "./supabase";
-import { MapPin, Map as MapIcon, FileText, KeyRound, ShieldCheck, ArrowRight } from "lucide-react";
+import { MapPin, Map as MapIcon, FileText, KeyRound, ShieldCheck, ArrowRight, Heart } from "lucide-react";
 
 const SEOUL = [37.55, 126.99];
 // ★색 = 재개발 환경 유사도 백분위. 빨강(높음=재개발된 동네와 닮음) → 초록(낮음=거리 멂).
@@ -127,7 +127,52 @@ const stripSimilar = (b) => b
   .replace(/유사사례[^.·\n]*[.·]?/g, "")
   .replace(/\s{2,}/g, " ").replace(/^[·.\s]+/, "").trim();
 
-function ReportPanel({ r }) {
+// 즐겨찾기 하트 — 리포트의 pnu를 watchlist에 토글 저장(supabase 직접, RLS=본인만).
+// 진입 시 select로 이미 저장됐는지 확인 → 채움/빈하트. 추가는 upsert(UNIQUE라 중복 안 쌓임), 재클릭은 delete.
+function FavoriteButton({ pnu, address, session }) {
+  const uid = session?.user?.id;
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => {                                   // ★진입 시 저장 여부 조회
+    let alive = true;
+    setErr(null);
+    if (!supabase || !uid || !pnu) { setSaved(false); return; }
+    supabase.from("watchlist").select("id").eq("user_id", uid).eq("pnu", pnu).maybeSingle()
+      .then(({ data, error }) => { if (alive) { if (error) setErr(error.message); setSaved(Boolean(data)); } });
+    return () => { alive = false; };
+  }, [uid, pnu]);
+  if (!supabase || !uid || !pnu) return null;         // 로그인 안 됐거나 필지 없으면 버튼 숨김
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true); setErr(null);
+    try {
+      if (saved) {                                    // 토글 해제 — 본인·해당 필지 행 삭제
+        const { error } = await supabase.from("watchlist").delete().eq("user_id", uid).eq("pnu", pnu);
+        if (error) throw error;
+        setSaved(false);
+      } else {                                         // 추가 — UNIQUE(user_id,pnu) 충돌은 무시(멱등)
+        const { error } = await supabase.from("watchlist")
+          .upsert({ user_id: uid, pnu, address }, { onConflict: "user_id,pnu" });
+        if (error) throw error;
+        setSaved(true);
+      }
+    } catch (e) { setErr(e?.message || String(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="fav-row">
+      <button className={`fav-btn${saved ? " on" : ""}`} onClick={toggle} disabled={busy}
+        aria-pressed={saved} title={saved ? "즐겨찾기 해제" : "즐겨찾기 추가"}>
+        <Heart size={16} fill={saved ? "currentColor" : "none"} />
+        <span>{saved ? "저장됨" : "즐겨찾기"}</span>
+      </button>
+      {err && <span className="fav-err">저장 실패: {err}</span>}
+    </div>
+  );
+}
+
+function ReportPanel({ r, session, address }) {
   if (!r) return <p className="muted">주소를 입력하면 닮은 재개발 동네 분석이 나옵니다.</p>;
   if (r.error) return <p style={{ color: "#c00" }}>{r.error}</p>;
   const partial = r.scope === "global_partial";
@@ -139,6 +184,8 @@ function ReportPanel({ r }) {
     .filter((s) => s.body);                              // 유사사례만 있던 리스크는 비면 제거
   return (
     <div className="report">
+      {/* 즐겨찾기 — 로그인 + 필지(pnu) 있을 때만 (FavoriteButton 내부 가드) */}
+      <FavoriteButton pnu={r.pnu} address={address} session={session} />
       {/* 히어로: 닮은 동네 / 폴백 */}
       {partial ? <Fallback kind="partial" note={r.report?.partial_note} />
         : matches.length ? <><SimilarHero matches={matches} /><WhySimilar retrieval={r.retrieval} /></>
@@ -238,19 +285,28 @@ function MapLegend() {
 }
 
 // ───────── 기능 페이지(검색·스크리너·지도) — 기존 기능 그대로, 사이트 안으로 편입 ─────────
-function Workspace() {
+function Workspace({ session, pendingAddr, onConsumePending }) {
   const [tab, setTab] = useState("search");
   const [addr, setAddr] = useState("성북구 정릉동 170-1");
   const [report, setReport] = useState(null);
   const [pos, setPos] = useState(null);
-  const search = () => {
+  const search = (a = addr) => {
     setReport({ loading: true });
     /* ★stage 하드코딩 금지(누수 경로) — 실제 단계를 모르면 보내지 않는다. in_zone+stage일 때만 '언제' 출력 */
-    authedFetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: addr, property_type: "다세대" }) })
+    authedFetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: a, property_type: "다세대" }) })
       .then((r) => r.json())
       .then((r) => { setReport(r); if (r.lat) setPos([r.lat, r.lon]); })
       .catch((e) => setReport({ error: String(e) }));
   };
+  // ★마이페이지 항목 클릭 → pendingAddr로 들어옴: 검색탭 + 주소 세팅 + 분석을 같은 경로로 재사용.
+  useEffect(() => {
+    if (!pendingAddr) return;
+    setTab("search");
+    setAddr(pendingAddr);
+    search(pendingAddr);
+    onConsumePending?.();                              // 1회 소비 — 재진입 시 재분석 방지
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAddr]);
   return (
     <div className="app">
       <div className="panel">
@@ -262,9 +318,9 @@ function Workspace() {
           <>
             <div className="search">
               <input value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="지번 주소 (예: 성북구 정릉동 170-1)" />
-              <button onClick={search}>분석</button>
+              <button onClick={() => search()}>분석</button>
             </div>
-            {report?.loading ? <p className="muted">분석 중…</p> : <ReportPanel r={report} />}
+            {report?.loading ? <p className="muted">분석 중…</p> : <ReportPanel r={report} session={session} address={addr} />}
           </>
         ) : (
           <Screener onPick={setPos} />
@@ -278,6 +334,214 @@ function Workspace() {
           <FlyTo pos={pos} />
         </MapContainer>
         <MapLegend />
+      </div>
+    </div>
+  );
+}
+
+// 마이페이지 사이드 메뉴 — 지금은 즐겨찾기 하나, 향후 '설정' 등 추가 자리.
+const MP_MENUS = [{ id: "watchlist", label: "즐겨찾기" }];
+
+// 즐겨찾기 패널 — 목록·클릭이동·삭제(이전 단계 로직 재사용).
+function WatchlistPanel({ uid, openReport }) {
+  const [items, setItems] = useState(null);            // null=로딩, []=빈, [...]=목록
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!supabase || !uid) { setItems([]); return; }
+    supabase.from("watchlist").select("pnu,address,created_at")
+      .eq("user_id", uid).order("created_at", { ascending: false })
+      .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setItems(data || []); });
+    return () => { alive = false; };
+  }, [uid]);
+  const remove = async (pnu) => {
+    const prev = items;
+    setItems(items.filter((it) => it.pnu !== pnu));     // 낙관적 제거
+    const { error } = await supabase.from("watchlist").delete().eq("user_id", uid).eq("pnu", pnu);
+    if (error) { setErr(error.message); setItems(prev); } // 실패 시 롤백
+  };
+  return (
+    <section>
+      <h2 className="mp-h2">즐겨찾기 {Array.isArray(items) && items.length > 0 && <span className="mp-cnt">{items.length}</span>}</h2>
+      {err && <p className="fav-err">불러오기 실패: {err}</p>}
+      {items === null ? <p className="muted">불러오는 중…</p>
+        : items.length === 0 ? <p className="muted">아직 즐겨찾기한 곳이 없습니다. 주소를 분석한 뒤 하트를 눌러 저장해 보세요.</p>
+        : (
+          <ul className="mp-list">
+            {items.map((it) => (
+              <li key={it.pnu} className="mp-item">
+                <button className="mp-go" onClick={() => openReport(it.address)} title="이 주소 분석으로 이동">
+                  <span className="mp-addr">{it.address || `필지 …${String(it.pnu).slice(-8)}`}</span>
+                  <span className="mp-date">{(it.created_at || "").slice(0, 10)}</span>
+                </button>
+                <button className="mp-del" onClick={() => remove(it.pnu)} title="삭제" aria-label="삭제">✕</button>
+              </li>
+            ))}
+          </ul>
+        )}
+    </section>
+  );
+}
+
+// 닉네임 형식 — 2~20자, 한글·영문·숫자·일부 기호(_ - .). 공백/특수문자 차단.
+const NICK_RE = /^[가-힣a-zA-Z0-9_.\-]{2,20}$/;
+
+// ★닉네임 저장(공용) — profiles 본인 행 update. 성공이면 null, 실패면 사용자용 메시지.
+//   중복은 DB UNIQUE(lower(nickname))가 막고 위반코드 23505를 잡는다(동시성 source of truth).
+async function updateNickname(uid, v) {
+  const { error } = await supabase.from("profiles").update({ nickname: v }).eq("id", uid);
+  if (!error) return null;
+  return error.code === "23505" ? "이미 사용 중인 닉네임입니다." : (error.message || "저장 실패");
+}
+// 사전 중복 체크(UX용) — true=사용중, false=가능, null=판단보류(조회 실패).
+//   ★RLS(profiles_self_select=본인 행만)로 직접 select는 남의 닉을 못 봄 → security definer RPC(nickname_taken)로 조회.
+//   대소문자 무시(RPC가 lower 비교). 최종 방어는 저장 시 UNIQUE 23505.
+async function nicknameTaken(v) {
+  const { data, error } = await supabase.rpc("nickname_taken", { p: v });
+  if (error) return null;
+  return Boolean(data);
+}
+
+// 닉네임 표시 + 인라인 편집 — profiles.nickname을 본인 행에 update(RLS profiles_self_update).
+// 중복은 DB UNIQUE(lower(nickname))가 막고, 위반코드 23505를 catch(동시성 source of truth).
+function NicknameEditor({ uid, nickname, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(nickname || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const start = () => { setDraft(nickname || ""); setErr(null); setEditing(true); };
+  const cancel = () => { setEditing(false); setErr(null); };
+  const save = async () => {
+    const v = draft.trim();
+    if (!NICK_RE.test(v)) { setErr("2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다."); return; }
+    if (v === (nickname || "")) { setEditing(false); return; }   // 변경 없음
+    setBusy(true); setErr(null);
+    const msg = await updateNickname(uid, v);                     // 공용 저장(23505 처리 포함)
+    setBusy(false);
+    if (msg) { setErr(msg); return; }
+    onSaved(v);                                                   // 카드 즉시 반영
+    setEditing(false);
+  };
+  if (!editing) return (
+    <div className="mp-nick">
+      <span className={`mp-nick-v${nickname ? "" : " ph"}`}>{nickname || "닉네임 미설정"}</span>
+      <button className="mp-nick-edit" onClick={start}>수정</button>
+    </div>
+  );
+  return (
+    <div className="mp-nick editing">
+      <div className="mp-nick-row">
+        <input className="mp-nick-input" value={draft} maxLength={20} autoFocus
+          placeholder="닉네임 (2~20자)" onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") cancel(); }} />
+        <button className="mp-nick-save" disabled={busy} onClick={save}>{busy ? "저장 중…" : "저장"}</button>
+        <button className="mp-nick-cancel" disabled={busy} onClick={cancel}>취소</button>
+      </div>
+      {err && <span className="fav-err">{err}</span>}
+    </div>
+  );
+}
+
+// ───────── 첫 로그인 닉네임 설정 게이트 — 닉네임 없으면 메인 진입 전 1회(스킵 불가, 로그아웃은 가능) ─────────
+function NicknameSetup({ uid, onDone, logout }) {
+  const [draft, setDraft] = useState("");
+  const [avail, setAvail] = useState(null);            // null=미확인/형식미달, true=가능, false=사용중
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const v = draft.trim();
+  const validFmt = NICK_RE.test(v);
+  useEffect(() => {                                     // ★입력 중 사전 중복 체크(디바운스, UX)
+    setErr(null);
+    if (!validFmt) { setAvail(null); return; }
+    let alive = true;
+    const t = setTimeout(async () => {
+      const taken = await nicknameTaken(v);
+      if (alive) setAvail(taken == null ? null : !taken);
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+  }, [v, validFmt, uid]);
+  const save = async () => {
+    if (!validFmt) { setErr("2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다."); return; }
+    if (avail === false) { setErr("이미 사용 중인 닉네임입니다."); return; }
+    setBusy(true); setErr(null);
+    const msg = await updateNickname(uid, v);           // 최종 방어 = 23505
+    setBusy(false);
+    if (msg) { setErr(msg); if (msg.includes("사용 중")) setAvail(false); return; }
+    onDone(v);                                          // 메인 진입
+  };
+  return (
+    <main className="doc auth">
+      <div className="auth-card">
+        <h1>닉네임 설정</h1>
+        <p className="auth-sub">서비스 이용을 위해 <b>닉네임</b>을 설정해 주세요. (2~20자, 한글·영문·숫자·_-.)</p>
+        <input value={draft} maxLength={20} autoFocus placeholder="닉네임"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") save(); }} />
+        {v && (validFmt
+          ? (avail === false ? <div className="nick-hint bad">이미 사용 중인 닉네임입니다.</div>
+            : avail === true ? <div className="nick-hint ok">사용 가능한 닉네임입니다.</div>
+            : <div className="nick-hint">확인 중…</div>)
+          : <div className="nick-hint bad">2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다.</div>)}
+        <button className="btn-primary" disabled={busy || !validFmt || avail === false} onClick={save}>
+          {busy ? "저장 중…" : "닉네임 저장하고 시작하기"}
+        </button>
+        {err && <div className="auth-msg">{err}</div>}
+        <div className="auth-switch"><button onClick={logout}>로그아웃</button></div>
+      </div>
+    </main>
+  );
+}
+
+// ───────── 마이페이지 — 내 정보 + 사이드 메뉴 레이아웃 ─────────
+function MyPage({ session, openReport, go }) {
+  const uid = session?.user?.id;
+  const email = session?.user?.email;
+  const [menu, setMenu] = useState("watchlist");
+  const [profile, setProfile] = useState(null);        // profiles 테이블(구독상태·가입일)
+  useEffect(() => {
+    let alive = true;
+    if (!supabase || !uid) return;
+    supabase.from("profiles").select("nickname,subscription_status,created_at").eq("id", uid).maybeSingle()
+      .then(({ data }) => { if (alive && data) setProfile(data); });
+    return () => { alive = false; };
+  }, [uid]);
+  if (!uid) {                                           // 미로그인 가드 — 로그인 유도
+    return (
+      <div className="mypage">
+        <h1 className="mp-title">마이페이지</h1>
+        <p className="muted">로그인 후 즐겨찾기한 곳을 볼 수 있습니다.</p>
+        <button className="btn-primary" onClick={() => go("app")}>로그인하러 가기</button>
+      </div>
+    );
+  }
+  const joined = (profile?.created_at || session?.user?.created_at || "").slice(0, 10);
+  const plan = profile?.subscription_status;
+  return (
+    <div className="mp">
+      <h1 className="mp-title">마이페이지</h1>
+      {/* 내 정보 — 닉네임(편집) + 이메일 + profiles(구독·가입일) */}
+      <header className="mp-head">
+        <div className="mp-avatar">{(profile?.nickname || email || "?").slice(0, 1).toUpperCase()}</div>
+        <div className="mp-id">
+          <NicknameEditor uid={uid} nickname={profile?.nickname}
+            onSaved={(v) => setProfile((p) => ({ ...(p || {}), nickname: v }))} />
+          <div className="mp-email">{email || "로그인 사용자"}</div>
+          <div className="mp-meta">
+            {plan && <span className="mp-plan">{plan === "free" ? "무료 플랜" : plan}</span>}
+            {joined && <span>가입일 {joined}</span>}
+          </div>
+        </div>
+      </header>
+      {/* 사이드 메뉴 + 콘텐츠 */}
+      <div className="mp-body">
+        <aside className="mp-side">
+          {MP_MENUS.map((m) => (
+            <button key={m.id} className={`mp-menu${menu === m.id ? " on" : ""}`} onClick={() => setMenu(m.id)}>{m.label}</button>
+          ))}
+        </aside>
+        <main className="mp-main">
+          {menu === "watchlist" && <WatchlistPanel uid={uid} openReport={openReport} />}
+        </main>
       </div>
     </div>
   );
@@ -303,6 +567,7 @@ function Header({ view, go, session, logout }) {
       <div className="h-right">
         <nav className="site-nav">
           {NAV.map((n) => <button key={n.id} className={view === n.id ? "on" : ""} onClick={() => go(n.id)}>{n.label}</button>)}
+          {session && <button className={view === "mypage" ? "on" : ""} onClick={() => go("mypage")}>마이페이지</button>}
         </nav>
         {session
           ? <button className="auth-btn" onClick={logout} title={session.user?.email}>로그아웃</button>
@@ -320,6 +585,20 @@ function AuthPage({ onAuthed, go }) {
   const [agree, setAgree] = useState(false);
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [nickname, setNickname] = useState("");
+  const [nickAvail, setNickAvail] = useState(null);   // null=미확인/형식미달, true=가능, false=사용중
+  const nv = nickname.trim();
+  const nickValid = NICK_RE.test(nv);
+  useEffect(() => {                                    // ★가입 모드 닉네임 사전 중복체크(디바운스, RPC)
+    setNickAvail(null);
+    if (mode !== "signup" || !nickValid || !supabase) return;
+    let alive = true;
+    const t = setTimeout(async () => {
+      const taken = await nicknameTaken(nv);
+      if (alive) setNickAvail(taken == null ? null : !taken);
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+  }, [nv, nickValid, mode]);
   if (!authReady) return (
     <main className="doc"><div className="legal-banner">인증이 아직 설정되지 않았습니다 — <b>.env</b>의
       <code> VITE_SUPABASE_URL</code>·<code>VITE_SUPABASE_ANON_KEY</code>를 넣고 재기동하세요(Supabase 셋업 후).</div></main>
@@ -329,8 +608,13 @@ function AuthPage({ onAuthed, go }) {
     try {
       if (mode === "signup") {
         if (!agree) { setMsg("개인정보(이메일) 수집·이용에 동의해야 가입할 수 있습니다."); setBusy(false); return; }
-        const { error } = await supabase.auth.signUp({ email, password: pw });
-        if (error) throw error;
+        if (!nickValid) { setMsg("닉네임은 2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다."); setBusy(false); return; }
+        if (nickAvail === false) { setMsg("이미 사용 중인 닉네임입니다."); setBusy(false); return; }
+        const { error } = await supabase.auth.signUp({ email, password: pw, options: { data: { nickname: nv } } });
+        if (error) {                                   // ★트리거가 닉네임 중복(UNIQUE)으로 실패하면 가입 에러
+          const dup = error.code === "23505" || /duplicate|already|database error/i.test(error.message || "");
+          throw new Error(dup ? "이미 사용 중인 닉네임입니다 — 다른 닉네임으로 다시 시도하세요." : (error.message || "가입 실패"));
+        }
         setMsg("확인 메일을 보냈습니다 — 메일의 링크로 인증 후 로그인하세요.");
       } else if (mode === "login") {
         const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
@@ -353,12 +637,20 @@ function AuthPage({ onAuthed, go }) {
         <input type="email" placeholder="이메일" value={email} onChange={(e) => setEmail(e.target.value)} />
         {mode !== "reset" && <input type="password" placeholder="비밀번호 (6자 이상)" value={pw} onChange={(e) => setPw(e.target.value)} />}
         {mode === "signup" && (
-          <label className="auth-agree">
-            <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
-            <span>[필수] 개인정보(이메일) 수집·이용 동의 — <a onClick={() => go("privacy")}>개인정보처리방침</a> · <a onClick={() => go("disclaimer")}>면책</a> (초안)</span>
-          </label>
+          <>
+            <input placeholder="닉네임 (2~20자)" value={nickname} maxLength={20} onChange={(e) => setNickname(e.target.value)} />
+            {nv && (nickValid
+              ? (nickAvail === false ? <div className="nick-hint bad">이미 사용 중인 닉네임입니다.</div>
+                : nickAvail === true ? <div className="nick-hint ok">사용 가능한 닉네임입니다.</div>
+                : <div className="nick-hint">확인 중…</div>)
+              : <div className="nick-hint bad">2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다.</div>)}
+            <label className="auth-agree">
+              <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
+              <span>[필수] 개인정보(이메일) 수집·이용 동의 — <a onClick={() => go("privacy")}>개인정보처리방침</a> · <a onClick={() => go("disclaimer")}>면책</a> (초안)</span>
+            </label>
+          </>
         )}
-        <button className="btn-primary" disabled={busy} onClick={submit}>{busy ? "처리 중…" : title}</button>
+        <button className="btn-primary" disabled={busy || (mode === "signup" && (!nickValid || nickAvail === false))} onClick={submit}>{busy ? "처리 중…" : title}</button>
         {msg && <div className="auth-msg">{msg}</div>}
         <div className="auth-switch">
           {mode !== "login" && <button onClick={() => { setMode("login"); setMsg(null); }}>로그인</button>}
@@ -481,6 +773,8 @@ function Footer({ go }) {
 export default function App() {
   const [view, setView] = useState(() => window.location.hash.replace("#", "") || "home");
   const [session, setSession] = useState(null);
+  const [pendingAddr, setPendingAddr] = useState(null);   // 마이페이지→검색 분석 연결용
+  const [nick, setNick] = useState(undefined);            // undefined=로딩, null=미설정(게이트), 문자열=설정됨
   useEffect(() => {
     const on = () => setView(window.location.hash.replace("#", "") || "home");
     window.addEventListener("hashchange", on);
@@ -492,16 +786,28 @@ export default function App() {
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+  useEffect(() => {                                    // ★로그인 시 닉네임 조회 — 없으면 설정 게이트
+    if (!supabase || !session) { setNick(undefined); return; }
+    let alive = true;
+    supabase.from("profiles").select("nickname").eq("id", session.user.id).maybeSingle()
+      .then(({ data }) => { if (alive) setNick(data?.nickname || null); });   // 빈값/NULL → null(미설정)
+    return () => { alive = false; };
+  }, [session]);
   const go = (v) => { window.location.hash = v; setView(v); window.scrollTo(0, 0); };
   const logout = async () => { if (supabase) await supabase.auth.signOut(); go("home"); };
+  const openReport = (address) => { setPendingAddr(address); go("app"); };   // 마이페이지 항목 → 검색 분석
 
   const needAuth = view === "app" && !session;        // ★게이트: 검색은 로그인 필수
   const body = needAuth ? <AuthPage onAuthed={() => go("app")} go={go} />
-    : view === "app" ? <Workspace />
+    : view === "app" ? (
+        nick === undefined ? <main className="doc auth"><div className="auth-card"><p className="muted">불러오는 중…</p></div></main>
+        : !nick ? <NicknameSetup uid={session.user.id} onDone={(v) => setNick(v)} logout={logout} />   // ★닉네임 없으면 설정(스킵 불가)
+        : <Workspace session={session} pendingAddr={pendingAddr} onConsumePending={() => setPendingAddr(null)} />)
+    : view === "mypage" ? (session ? <MyPage session={session} openReport={openReport} go={go} /> : <AuthPage onAuthed={() => go("mypage")} go={go} />)
     : view === "guide" ? <Guide go={go} />
     : ["terms", "privacy", "disclaimer"].includes(view) ? <Legal kind={view} />
     : <Landing go={go} />;
-  const fullApp = view === "app" && !needAuth;        // 풀높이 지도 레이아웃은 로그인 후에만
+  const fullApp = view === "app" && !needAuth && !!nick;   // 풀높이 지도 = 로그인 + 닉네임 설정 후에만(게이트/로딩은 일반 레이아웃)
   return (
     <div className={`site ${fullApp ? "is-app" : ""}`}>
       <Header view={view} go={go} session={session} logout={logout} />
