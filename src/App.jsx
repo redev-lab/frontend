@@ -548,7 +548,7 @@ function MyPage({ session, openReport, go }) {
 }
 
 const BRAND = "재개발 투자 판단";
-const NAV = [{ id: "home", label: "소개" }, { id: "guide", label: "이용방법" }, { id: "app", label: "검색" }];
+const NAV = [{ id: "home", label: "소개" }, { id: "guide", label: "이용방법" }, { id: "app", label: "검색" }, { id: "board", label: "게시판" }];
 const FEATURES = [
   { Icon: MapPin, t: "주소로 환경 분석", d: "지번 하나로 그 일대의 노후 환경 유사도와 재개발 요건 충족 여부를 정리해 봅니다." },
   { Icon: MapIcon, t: "지도 시각화", d: "일대 필지의 환경 점수를 색으로 표시합니다. 구역 경계가 아닌 참고용 분포입니다." },
@@ -557,6 +557,7 @@ const FEATURES = [
 ];
 
 function Header({ view, go, session, logout }) {
+  const [page] = view.split("/");                     // board/123 → board 하이라이트
   return (
     <header className="site-h">
       <div className="brand" onClick={() => go("home")} role="button">
@@ -566,8 +567,8 @@ function Header({ view, go, session, logout }) {
       </div>
       <div className="h-right">
         <nav className="site-nav">
-          {NAV.map((n) => <button key={n.id} className={view === n.id ? "on" : ""} onClick={() => go(n.id)}>{n.label}</button>)}
-          {session && <button className={view === "mypage" ? "on" : ""} onClick={() => go("mypage")}>마이페이지</button>}
+          {NAV.map((n) => <button key={n.id} className={page === n.id ? "on" : ""} onClick={() => go(n.id)}>{n.label}</button>)}
+          {session && <button className={page === "mypage" ? "on" : ""} onClick={() => go("mypage")}>마이페이지</button>}
         </nav>
         {session
           ? <button className="auth-btn" onClick={logout} title={session.user?.email}>로그아웃</button>
@@ -770,6 +771,182 @@ function Footer({ go }) {
   );
 }
 
+// 수정됨 판정 — updated_at가 created_at보다 1초+ 뒤면 수정된 글(insert 시엔 동일).
+const isEdited = (p) => p.created_at && p.updated_at && (new Date(p.updated_at) - new Date(p.created_at) > 1000);
+
+// ───────── 게시판 목록 — 읽기 공개(비로그인도 열람). 작성/상세는 다음 단계 ─────────
+function BoardList({ session, go }) {
+  const [posts, setPosts] = useState(null);            // null=로딩
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!supabase) { setPosts([]); return; }
+    supabase.from("posts").select("id,title,author_nick,created_at,updated_at").order("created_at", { ascending: false })
+      .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setPosts(data || []); });
+    return () => { alive = false; };
+  }, []);
+  return (
+    <main className="board">
+      <div className="board-head">
+        <h1 className="board-title">게시판</h1>
+        {session && <button className="btn-primary board-write" onClick={() => go("board/new")}>글쓰기</button>}
+      </div>
+      {err && <p className="fav-err">불러오기 실패: {err}</p>}
+      {posts === null ? <p className="muted">불러오는 중…</p>
+        : posts.length === 0 ? <p className="muted">아직 글이 없습니다.</p>
+        : (
+          <ul className="board-list">
+            {posts.map((p) => (
+              <li key={p.id} className="board-item" onClick={() => go(`board/${p.id}`)} role="button">
+                <div className="bi-title">{p.title}{isEdited(p) && <span className="bi-edited">수정됨</span>}</div>
+                <div className="bi-meta">
+                  <span className="bi-author">{p.author_nick || "익명"}</span>
+                  <span className="bi-date">{(p.created_at || "").slice(0, 10)}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+    </main>
+  );
+}
+
+// ───────── 게시판 글쓰기 — 로그인+닉네임 필수. user_id·author_nick은 트리거가 채움 ─────────
+function BoardWrite({ session, nick, go }) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  if (!session) {                                      // 비로그인 — 작성 로그인 필수
+    return (
+      <main className="doc auth"><div className="auth-card">
+        <h1>글쓰기</h1>
+        <p className="auth-sub">글 작성은 <b>로그인</b> 후 가능합니다.</p>
+        <button className="btn-primary" onClick={() => go("app")}>로그인하러 가기</button>
+        <div className="auth-switch"><button onClick={() => go("board")}>← 게시판으로</button></div>
+      </div></main>
+    );
+  }
+  if (nick === undefined) return <main className="doc auth"><div className="auth-card"><p className="muted">불러오는 중…</p></div></main>;
+  if (!nick) {                                         // 닉네임 미설정 — author_nick 보장 위해 먼저 설정
+    return (
+      <main className="doc auth"><div className="auth-card">
+        <h1>글쓰기</h1>
+        <p className="auth-sub">글 작성 전 <b>닉네임</b>을 먼저 설정해 주세요.</p>
+        <button className="btn-primary" onClick={() => go("app")}>닉네임 설정하러 가기</button>
+        <div className="auth-switch"><button onClick={() => go("board")}>← 게시판으로</button></div>
+      </div></main>
+    );
+  }
+  const t = title.trim(), b = body.trim();
+  const valid = t.length >= 2 && t.length <= 100 && b.length >= 1 && b.length <= 5000;
+  const submit = async () => {
+    if (!valid) { setErr("제목 2~100자, 내용 1~5000자로 입력해 주세요."); return; }
+    setBusy(true); setErr(null);
+    // ★title·body만 전송 — user_id·author_nick·시각은 posts_stamp 트리거가 채움. id는 받아서 상세로 이동.
+    const { data, error } = await supabase.from("posts").insert({ title: t, body: b }).select("id").single();
+    setBusy(false);
+    if (error) { setErr(error.message || "작성 실패"); return; }
+    go(data?.id ? `board/${data.id}` : "board");       // 상세(다음 단계) — 없으면 목록
+  };
+  return (
+    <main className="board">
+      <div className="board-head"><h1 className="board-title">글쓰기</h1></div>
+      <div className="bw-form">
+        <input className="bw-title" placeholder="제목 (2~100자)" value={title} maxLength={100}
+          onChange={(e) => setTitle(e.target.value)} />
+        <textarea className="bw-body" placeholder="내용" value={body} maxLength={5000} rows={12}
+          onChange={(e) => setBody(e.target.value)} />
+        {err && <p className="fav-err">{err}</p>}
+        <div className="bw-actions">
+          <button className="btn-ghost" onClick={() => go("board")} disabled={busy}>취소</button>
+          <button className="btn-primary" onClick={submit} disabled={busy || !valid}>{busy ? "작성 중…" : "등록"}</button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// ───────── 게시판 상세 — 읽기 공개. 본인 글만 수정/삭제(RLS+UI 이중) ─────────
+function BoardDetail({ id, session, go }) {
+  const [post, setPost] = useState(undefined);         // undefined=로딩, null=없음, obj=글
+  const [err, setErr] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    if (!supabase) { setPost(null); return; }
+    supabase.from("posts").select("*").eq("id", id).maybeSingle()
+      .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setPost(data || null); });
+    return () => { alive = false; };
+  }, [id]);
+  if (post === undefined) return <main className="board"><p className="muted">불러오는 중…</p></main>;
+  if (!post) return (
+    <main className="board">
+      <p className="muted">글을 찾을 수 없습니다.{err ? ` (${err})` : ""}</p>
+      <button className="btn-ghost" onClick={() => go("board")}>← 게시판으로</button>
+    </main>
+  );
+  const mine = session?.user?.id && session.user.id === post.user_id;   // 본인 글만 수정/삭제
+  const edited = isEdited(post);
+  const startEdit = () => { setTitle(post.title); setBody(post.body); setErr(null); setEditing(true); };
+  const t = title.trim(), b = body.trim();
+  const valid = t.length >= 2 && t.length <= 100 && b.length >= 1 && b.length <= 5000;
+  const saveEdit = async () => {
+    if (!valid) { setErr("제목 2~100자, 내용 1~5000자로 입력해 주세요."); return; }
+    setBusy(true); setErr(null);
+    const { data, error } = await supabase.from("posts").update({ title: t, body: b }).eq("id", id).select("*").single();
+    setBusy(false);
+    if (error) { setErr(error.message || "수정 실패"); return; }   // RLS가 남의 글 막음
+    setPost(data); setEditing(false);                              // updated_at은 트리거가 갱신 → "수정됨"
+  };
+  const remove = async () => {
+    if (!window.confirm("이 글을 삭제할까요? 되돌릴 수 없습니다.")) return;
+    setBusy(true); setErr(null);
+    const { error } = await supabase.from("posts").delete().eq("id", id);
+    setBusy(false);
+    if (error) { setErr(error.message || "삭제 실패"); return; }
+    go("board");
+  };
+  if (editing) return (
+    <main className="board">
+      <div className="board-head"><h1 className="board-title">글 수정</h1></div>
+      <div className="bw-form">
+        <input className="bw-title" placeholder="제목 (2~100자)" value={title} maxLength={100} onChange={(e) => setTitle(e.target.value)} />
+        <textarea className="bw-body" placeholder="내용" value={body} maxLength={5000} rows={12} onChange={(e) => setBody(e.target.value)} />
+        {err && <p className="fav-err">{err}</p>}
+        <div className="bw-actions">
+          <button className="btn-ghost" onClick={() => setEditing(false)} disabled={busy}>취소</button>
+          <button className="btn-primary" onClick={saveEdit} disabled={busy || !valid}>{busy ? "저장 중…" : "저장"}</button>
+        </div>
+      </div>
+    </main>
+  );
+  return (
+    <main className="board">
+      <button className="btn-ghost bd-back" onClick={() => go("board")}>← 목록</button>
+      <article className="bd">
+        <h1 className="bd-title">{post.title}</h1>
+        <div className="bd-meta">
+          <span className="bd-author">{post.author_nick || "익명"}</span>
+          <span className="bd-date">{(post.created_at || "").slice(0, 10)}</span>
+          {edited && <span className="bi-edited">수정됨 {(post.updated_at || "").slice(0, 16).replace("T", " ")}</span>}
+        </div>
+        {err && <p className="fav-err">{err}</p>}
+        <div className="bd-body">{post.body}</div>
+        {mine && (
+          <div className="bd-actions">
+            <button className="btn-ghost" onClick={startEdit} disabled={busy}>수정</button>
+            <button className="btn-ghost bd-del" onClick={remove} disabled={busy}>삭제</button>
+          </div>
+        )}
+      </article>
+    </main>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState(() => window.location.hash.replace("#", "") || "home");
   const [session, setSession] = useState(null);
@@ -797,6 +974,7 @@ export default function App() {
   const logout = async () => { if (supabase) await supabase.auth.signOut(); go("home"); };
   const openReport = (address) => { setPendingAddr(address); go("app"); };   // 마이페이지 항목 → 검색 분석
 
+  const [page, sub] = view.split("/");                // ★해시 파싱: "board/123" → page="board", sub="123"
   const needAuth = view === "app" && !session;        // ★게이트: 검색은 로그인 필수
   const body = needAuth ? <AuthPage onAuthed={() => go("app")} go={go} />
     : view === "app" ? (
@@ -804,6 +982,9 @@ export default function App() {
         : !nick ? <NicknameSetup uid={session.user.id} onDone={(v) => setNick(v)} logout={logout} />   // ★닉네임 없으면 설정(스킵 불가)
         : <Workspace session={session} pendingAddr={pendingAddr} onConsumePending={() => setPendingAddr(null)} />)
     : view === "mypage" ? (session ? <MyPage session={session} openReport={openReport} go={go} /> : <AuthPage onAuthed={() => go("mypage")} go={go} />)
+    : page === "board" ? (sub === "new" ? <BoardWrite session={session} nick={nick} go={go} />   // #board/new = 작성
+        : sub ? <BoardDetail id={sub} session={session} go={go} />                                 // #board/<id> = 상세
+        : <BoardList session={session} go={go} />)                                                // #board = 목록
     : view === "guide" ? <Guide go={go} />
     : ["terms", "privacy", "disclaimer"].includes(view) ? <Legal kind={view} />
     : <Landing go={go} />;
