@@ -339,8 +339,8 @@ function Workspace({ session, pendingAddr, onConsumePending }) {
   );
 }
 
-// 마이페이지 사이드 메뉴 — 지금은 즐겨찾기 하나, 향후 '설정' 등 추가 자리.
-const MP_MENUS = [{ id: "watchlist", label: "즐겨찾기" }];
+// 마이페이지 사이드 메뉴 — 즐겨찾기 / 내 글(향후 '설정' 등 추가 자리).
+const MP_MENUS = [{ id: "watchlist", label: "즐겨찾기" }, { id: "myposts", label: "내 글" }];
 
 // 즐겨찾기 패널 — 목록·클릭이동·삭제(이전 단계 로직 재사용).
 function WatchlistPanel({ uid, openReport }) {
@@ -375,6 +375,40 @@ function WatchlistPanel({ uid, openReport }) {
                   <span className="mp-date">{(it.created_at || "").slice(0, 10)}</span>
                 </button>
                 <button className="mp-del" onClick={() => remove(it.pnu)} title="삭제" aria-label="삭제">✕</button>
+              </li>
+            ))}
+          </ul>
+        )}
+    </section>
+  );
+}
+
+// 내 글 패널 — 내가 쓴 posts 목록(즐겨찾기 UI 패턴 재사용). 클릭 → 상세(BoardDetail).
+function MyPostsPanel({ uid, go }) {
+  const [items, setItems] = useState(null);            // null=로딩
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!supabase || !uid) { setItems([]); return; }
+    supabase.from("posts").select("id,title,created_at,updated_at")
+      .eq("user_id", uid).order("created_at", { ascending: false })
+      .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setItems(data || []); });
+    return () => { alive = false; };
+  }, [uid]);
+  return (
+    <section>
+      <h2 className="mp-h2">내 글 {Array.isArray(items) && items.length > 0 && <span className="mp-cnt">{items.length}</span>}</h2>
+      {err && <p className="fav-err">불러오기 실패: {err}</p>}
+      {items === null ? <p className="muted">불러오는 중…</p>
+        : items.length === 0 ? <p className="muted">작성한 글이 없습니다.</p>
+        : (
+          <ul className="mp-list">
+            {items.map((p) => (
+              <li key={p.id} className="mp-item">
+                <button className="mp-go" onClick={() => go(`board/${p.id}`)} title="글 보기">
+                  <span className="mp-addr">{p.title}{isEdited(p) && <span className="bi-edited">수정됨</span>}</span>
+                  <span className="mp-date">{(p.created_at || "").slice(0, 10)}</span>
+                </button>
               </li>
             ))}
           </ul>
@@ -541,6 +575,7 @@ function MyPage({ session, openReport, go }) {
         </aside>
         <main className="mp-main">
           {menu === "watchlist" && <WatchlistPanel uid={uid} openReport={openReport} />}
+          {menu === "myposts" && <MyPostsPanel uid={uid} go={go} />}
         </main>
       </div>
     </div>
@@ -781,7 +816,7 @@ function BoardList({ session, go }) {
   useEffect(() => {
     let alive = true;
     if (!supabase) { setPosts([]); return; }
-    supabase.from("posts").select("id,title,author_nick,created_at,updated_at").order("created_at", { ascending: false })
+    supabase.from("posts").select("id,title,author_nick,created_at,updated_at,comments(count)").order("created_at", { ascending: false })
       .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setPosts(data || []); });
     return () => { alive = false; };
   }, []);
@@ -802,6 +837,7 @@ function BoardList({ session, go }) {
                 <div className="bi-meta">
                   <span className="bi-author">{p.author_nick || "익명"}</span>
                   <span className="bi-date">{(p.created_at || "").slice(0, 10)}</span>
+                  {p.comments?.[0]?.count > 0 && <span className="bi-cmt">💬 {p.comments[0].count}</span>}
                 </div>
               </li>
             ))}
@@ -943,7 +979,155 @@ function BoardDetail({ id, session, go }) {
           </div>
         )}
       </article>
+      <Comments postId={id} session={session} />
     </main>
+  );
+}
+
+// ───────── 댓글 + 대댓글(1depth) — 읽기 공개, 본인 것만 수정/삭제(RLS+UI 이중) ─────────
+function Comments({ postId, session }) {
+  const uid = session?.user?.id;
+  const [list, setList] = useState(null);              // null=로딩 (최상위+답글 평면 배열, parent_id로 구분)
+  const [err, setErr] = useState(null);
+  const [draft, setDraft] = useState("");              // 최상위 작성
+  const [busy, setBusy] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [editBody, setEditBody] = useState("");
+  const [replyTo, setReplyTo] = useState(null);        // 답글 폼 연 부모 댓글 id
+  const [replyDraft, setReplyDraft] = useState("");
+  const [expanded, setExpanded] = useState(() => new Set());   // 답글 펼친 부모 id들(기본 접힘)
+  const toggle = (id) => setExpanded((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  useEffect(() => {
+    let alive = true;
+    if (!supabase) { setList([]); return; }
+    supabase.from("comments").select("*").eq("post_id", postId).order("created_at", { ascending: true })
+      .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setList(data || []); });
+    return () => { alive = false; };
+  }, [postId]);
+  // post_id·body(+parent_id)만 — user_id·author_nick·시각은 comments_stamp 트리거가 채움
+  const submit = async (body, parentId) => {
+    const b = body.trim();
+    if (!b) return false;
+    setBusy(true); setErr(null);
+    const payload = parentId ? { post_id: postId, body: b, parent_id: parentId } : { post_id: postId, body: b };
+    const { data, error } = await supabase.from("comments").insert(payload).select("*").single();
+    setBusy(false);
+    if (error) { setErr(error.message || "등록 실패"); return false; }
+    setList((cur) => [...(cur || []), data]);
+    return true;
+  };
+  const addTop = async () => { if (await submit(draft, null)) setDraft(""); };
+  const addReply = async () => {
+    const pid = replyTo;
+    if (await submit(replyDraft, pid)) {
+      setReplyDraft(""); setReplyTo(null);
+      setExpanded((s) => { const n = new Set(s); n.add(pid); return n; });   // 새 답글 보이게 자동 펼침
+    }
+  };
+  const saveEdit = async (cid) => {
+    const b = editBody.trim();
+    if (!b) return;
+    setBusy(true); setErr(null);
+    const { data, error } = await supabase.from("comments").update({ body: b }).eq("id", cid).select("*").single();
+    setBusy(false);
+    if (error) { setErr(error.message || "수정 실패"); return; }   // RLS가 남의 댓글 막음
+    setList((cur) => cur.map((c) => (c.id === cid ? data : c))); setEditId(null);
+  };
+  const del = async (cid) => {
+    if (!window.confirm("삭제할까요? (답글이 있으면 함께 삭제됩니다)")) return;
+    const prev = list;
+    // 낙관적 제거 — 답글이면 자신만, 최상위면 그 답글들(parent_id=cid)도 함께(서버 cascade와 일치)
+    setList((cur) => cur.filter((c) => c.id !== cid && c.parent_id !== cid));
+    const { error } = await supabase.from("comments").delete().eq("id", cid);
+    if (error) { setErr(error.message || "삭제 실패"); setList(prev); }
+  };
+
+  // 1depth 트리: 최상위(!parent_id) + parent_id별 답글. ★답글 버튼은 최상위에만 → 깊이 1단계 강제.
+  const arr = Array.isArray(list) ? list : [];
+  const tops = arr.filter((c) => !c.parent_id);
+  const topIds = new Set(tops.map((t) => t.id));
+  const repliesOf = (pid) => arr.filter((c) => c.parent_id === pid);
+  const orphans = arr.filter((c) => c.parent_id && !topIds.has(c.parent_id));   // 안전망(부모 유실 시 최상위로)
+  const count = arr.length;                                                     // 답글 포함
+
+  const renderRow = (c, isReply) => {
+    const mine = uid && uid === c.user_id;
+    const showActions = (!isReply && uid) || mine;
+    return (
+      <li key={c.id} className={`cmt-item${isReply ? " cmt-reply" : ""}`}>
+        <div className="cmt-meta">
+          <span className="cmt-author">{c.author_nick || "익명"}</span>
+          <span className="cmt-date">{(c.created_at || "").slice(0, 10)}</span>
+          {isEdited(c) && <span className="bi-edited">수정됨</span>}
+        </div>
+        {editId === c.id ? (
+          <div className="cmt-editbox">
+            <textarea value={editBody} maxLength={2000} rows={3} onChange={(e) => setEditBody(e.target.value)} />
+            <div className="cmt-act">
+              <button className="btn-ghost" onClick={() => setEditId(null)} disabled={busy}>취소</button>
+              <button className="btn-primary" onClick={() => saveEdit(c.id)} disabled={busy || !editBody.trim()}>저장</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="cmt-body">{c.body}</div>
+            {showActions && (
+              <div className="cmt-own">
+                {!isReply && uid && <button onClick={() => { setReplyTo(replyTo === c.id ? null : c.id); setReplyDraft(""); setErr(null); }}>답글</button>}
+                {mine && <button onClick={() => { setEditId(c.id); setEditBody(c.body); setErr(null); }}>수정</button>}
+                {mine && <button className="cmt-del" onClick={() => del(c.id)}>삭제</button>}
+              </div>
+            )}
+          </>
+        )}
+        {!isReply && replyTo === c.id && uid && (
+          <div className="cmt-replybox">
+            <textarea placeholder="답글을 입력하세요" value={replyDraft} maxLength={2000} rows={2} onChange={(e) => setReplyDraft(e.target.value)} />
+            <div className="cmt-act">
+              <button className="btn-ghost" onClick={() => { setReplyTo(null); setReplyDraft(""); }} disabled={busy}>취소</button>
+              <button className="btn-primary" onClick={addReply} disabled={busy || !replyDraft.trim()}>답글 등록</button>
+            </div>
+          </div>
+        )}
+      </li>
+    );
+  };
+
+  return (
+    <section className="cmt">
+      <h2 className="cmt-h">댓글 {count > 0 && <span className="mp-cnt">{count}</span>}</h2>
+      {err && <p className="fav-err">{err}</p>}
+      {list === null ? <p className="muted">불러오는 중…</p>
+        : count === 0 ? <p className="muted">아직 댓글이 없습니다.</p>
+        : (
+          <ul className="cmt-list">
+            {tops.map((t) => {
+              const reps = repliesOf(t.id);
+              const open = expanded.has(t.id);
+              return [
+                renderRow(t, false),
+                reps.length > 0 && (
+                  <li key={t.id + "_tg"} className="cmt-togglerow">
+                    <button className="cmt-toggle" onClick={() => toggle(t.id)}>
+                      {open ? "답글 숨기기 ▴" : `답글 ${reps.length}개 보기 ▾`}
+                    </button>
+                  </li>
+                ),
+                ...(open ? reps.map((r) => renderRow(r, true)) : []),
+              ];
+            })}
+            {orphans.map((o) => renderRow(o, false))}
+          </ul>
+        )}
+      {uid ? (
+        <div className="cmt-write">
+          <textarea placeholder="댓글을 입력하세요" value={draft} maxLength={2000} rows={3} onChange={(e) => setDraft(e.target.value)} />
+          <div className="cmt-act">
+            <button className="btn-primary" onClick={addTop} disabled={busy || !draft.trim()}>{busy ? "등록 중…" : "댓글 등록"}</button>
+          </div>
+        </div>
+      ) : <p className="muted cmt-login">댓글을 쓰려면 로그인하세요.</p>}
+    </section>
   );
 }
 
