@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
 import { supabase, authReady, authedFetch } from "./supabase";
-import { MapPin, Map as MapIcon, FileText, KeyRound, ShieldCheck, ArrowRight } from "lucide-react";
+import { MapPin, Map as MapIcon, FileText, KeyRound, ShieldCheck, ArrowRight, Heart } from "lucide-react";
 
 const SEOUL = [37.55, 126.99];
 // ★색 = 재개발 환경 유사도 백분위. 빨강(높음=재개발된 동네와 닮음) → 초록(낮음=거리 멂).
@@ -127,7 +127,52 @@ const stripSimilar = (b) => b
   .replace(/유사사례[^.·\n]*[.·]?/g, "")
   .replace(/\s{2,}/g, " ").replace(/^[·.\s]+/, "").trim();
 
-function ReportPanel({ r }) {
+// 즐겨찾기 하트 — 리포트의 pnu를 watchlist에 토글 저장(supabase 직접, RLS=본인만).
+// 진입 시 select로 이미 저장됐는지 확인 → 채움/빈하트. 추가는 upsert(UNIQUE라 중복 안 쌓임), 재클릭은 delete.
+function FavoriteButton({ pnu, address, session }) {
+  const uid = session?.user?.id;
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => {                                   // ★진입 시 저장 여부 조회
+    let alive = true;
+    setErr(null);
+    if (!supabase || !uid || !pnu) { setSaved(false); return; }
+    supabase.from("watchlist").select("id").eq("user_id", uid).eq("pnu", pnu).maybeSingle()
+      .then(({ data, error }) => { if (alive) { if (error) setErr(error.message); setSaved(Boolean(data)); } });
+    return () => { alive = false; };
+  }, [uid, pnu]);
+  if (!supabase || !uid || !pnu) return null;         // 로그인 안 됐거나 필지 없으면 버튼 숨김
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true); setErr(null);
+    try {
+      if (saved) {                                    // 토글 해제 — 본인·해당 필지 행 삭제
+        const { error } = await supabase.from("watchlist").delete().eq("user_id", uid).eq("pnu", pnu);
+        if (error) throw error;
+        setSaved(false);
+      } else {                                         // 추가 — UNIQUE(user_id,pnu) 충돌은 무시(멱등)
+        const { error } = await supabase.from("watchlist")
+          .upsert({ user_id: uid, pnu, address }, { onConflict: "user_id,pnu" });
+        if (error) throw error;
+        setSaved(true);
+      }
+    } catch (e) { setErr(e?.message || String(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="fav-row">
+      <button className={`fav-btn${saved ? " on" : ""}`} onClick={toggle} disabled={busy}
+        aria-pressed={saved} title={saved ? "즐겨찾기 해제" : "즐겨찾기 추가"}>
+        <Heart size={16} fill={saved ? "currentColor" : "none"} />
+        <span>{saved ? "저장됨" : "즐겨찾기"}</span>
+      </button>
+      {err && <span className="fav-err">저장 실패: {err}</span>}
+    </div>
+  );
+}
+
+function ReportPanel({ r, session, address }) {
   if (!r) return <p className="muted">주소를 입력하면 닮은 재개발 동네 분석이 나옵니다.</p>;
   if (r.error) return <p style={{ color: "#c00" }}>{r.error}</p>;
   const partial = r.scope === "global_partial";
@@ -139,6 +184,8 @@ function ReportPanel({ r }) {
     .filter((s) => s.body);                              // 유사사례만 있던 리스크는 비면 제거
   return (
     <div className="report">
+      {/* 즐겨찾기 — 로그인 + 필지(pnu) 있을 때만 (FavoriteButton 내부 가드) */}
+      <FavoriteButton pnu={r.pnu} address={address} session={session} />
       {/* 히어로: 닮은 동네 / 폴백 */}
       {partial ? <Fallback kind="partial" note={r.report?.partial_note} />
         : matches.length ? <><SimilarHero matches={matches} /><WhySimilar retrieval={r.retrieval} /></>
@@ -238,19 +285,28 @@ function MapLegend() {
 }
 
 // ───────── 기능 페이지(검색·스크리너·지도) — 기존 기능 그대로, 사이트 안으로 편입 ─────────
-function Workspace() {
+function Workspace({ session, pendingAddr, onConsumePending }) {
   const [tab, setTab] = useState("search");
   const [addr, setAddr] = useState("성북구 정릉동 170-1");
   const [report, setReport] = useState(null);
   const [pos, setPos] = useState(null);
-  const search = () => {
+  const search = (a = addr) => {
     setReport({ loading: true });
     /* ★stage 하드코딩 금지(누수 경로) — 실제 단계를 모르면 보내지 않는다. in_zone+stage일 때만 '언제' 출력 */
-    authedFetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: addr, property_type: "다세대" }) })
+    authedFetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: a, property_type: "다세대" }) })
       .then((r) => r.json())
       .then((r) => { setReport(r); if (r.lat) setPos([r.lat, r.lon]); })
       .catch((e) => setReport({ error: String(e) }));
   };
+  // ★마이페이지 항목 클릭 → pendingAddr로 들어옴: 검색탭 + 주소 세팅 + 분석을 같은 경로로 재사용.
+  useEffect(() => {
+    if (!pendingAddr) return;
+    setTab("search");
+    setAddr(pendingAddr);
+    search(pendingAddr);
+    onConsumePending?.();                              // 1회 소비 — 재진입 시 재분석 방지
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAddr]);
   return (
     <div className="app">
       <div className="panel">
@@ -262,9 +318,9 @@ function Workspace() {
           <>
             <div className="search">
               <input value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="지번 주소 (예: 성북구 정릉동 170-1)" />
-              <button onClick={search}>분석</button>
+              <button onClick={() => search()}>분석</button>
             </div>
-            {report?.loading ? <p className="muted">분석 중…</p> : <ReportPanel r={report} />}
+            {report?.loading ? <p className="muted">분석 중…</p> : <ReportPanel r={report} session={session} address={addr} />}
           </>
         ) : (
           <Screener onPick={setPos} />
@@ -278,6 +334,151 @@ function Workspace() {
           <FlyTo pos={pos} />
         </MapContainer>
         <MapLegend />
+      </div>
+    </div>
+  );
+}
+
+// 마이페이지 사이드 메뉴 — 지금은 즐겨찾기 하나, 향후 '설정' 등 추가 자리.
+const MP_MENUS = [{ id: "watchlist", label: "즐겨찾기" }];
+
+// 즐겨찾기 패널 — 목록·클릭이동·삭제(이전 단계 로직 재사용).
+function WatchlistPanel({ uid, openReport }) {
+  const [items, setItems] = useState(null);            // null=로딩, []=빈, [...]=목록
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!supabase || !uid) { setItems([]); return; }
+    supabase.from("watchlist").select("pnu,address,created_at")
+      .eq("user_id", uid).order("created_at", { ascending: false })
+      .then(({ data, error }) => { if (!alive) return; if (error) setErr(error.message); setItems(data || []); });
+    return () => { alive = false; };
+  }, [uid]);
+  const remove = async (pnu) => {
+    const prev = items;
+    setItems(items.filter((it) => it.pnu !== pnu));     // 낙관적 제거
+    const { error } = await supabase.from("watchlist").delete().eq("user_id", uid).eq("pnu", pnu);
+    if (error) { setErr(error.message); setItems(prev); } // 실패 시 롤백
+  };
+  return (
+    <section>
+      <h2 className="mp-h2">즐겨찾기 {Array.isArray(items) && items.length > 0 && <span className="mp-cnt">{items.length}</span>}</h2>
+      {err && <p className="fav-err">불러오기 실패: {err}</p>}
+      {items === null ? <p className="muted">불러오는 중…</p>
+        : items.length === 0 ? <p className="muted">아직 즐겨찾기한 곳이 없습니다. 주소를 분석한 뒤 하트를 눌러 저장해 보세요.</p>
+        : (
+          <ul className="mp-list">
+            {items.map((it) => (
+              <li key={it.pnu} className="mp-item">
+                <button className="mp-go" onClick={() => openReport(it.address)} title="이 주소 분석으로 이동">
+                  <span className="mp-addr">{it.address || `필지 …${String(it.pnu).slice(-8)}`}</span>
+                  <span className="mp-date">{(it.created_at || "").slice(0, 10)}</span>
+                </button>
+                <button className="mp-del" onClick={() => remove(it.pnu)} title="삭제" aria-label="삭제">✕</button>
+              </li>
+            ))}
+          </ul>
+        )}
+    </section>
+  );
+}
+
+// 닉네임 형식 — 2~20자, 한글·영문·숫자·일부 기호(_ - .). 공백/특수문자 차단.
+const NICK_RE = /^[가-힣a-zA-Z0-9_.\-]{2,20}$/;
+
+// 닉네임 표시 + 인라인 편집 — profiles.nickname을 본인 행에 update(RLS profiles_self_update).
+// 중복은 DB UNIQUE(lower(nickname))가 막고, 위반코드 23505를 catch(동시성 source of truth).
+function NicknameEditor({ uid, nickname, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(nickname || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const start = () => { setDraft(nickname || ""); setErr(null); setEditing(true); };
+  const cancel = () => { setEditing(false); setErr(null); };
+  const save = async () => {
+    const v = draft.trim();
+    if (!NICK_RE.test(v)) { setErr("2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다."); return; }
+    if (v === (nickname || "")) { setEditing(false); return; }   // 변경 없음
+    setBusy(true); setErr(null);
+    const { error } = await supabase.from("profiles").update({ nickname: v }).eq("id", uid);
+    setBusy(false);
+    if (error) {                                                  // ★23505=UNIQUE 위반 → 중복
+      setErr(error.code === "23505" ? "이미 사용 중인 닉네임입니다." : (error.message || "저장 실패"));
+      return;
+    }
+    onSaved(v);                                                   // 카드 즉시 반영
+    setEditing(false);
+  };
+  if (!editing) return (
+    <div className="mp-nick">
+      <span className={`mp-nick-v${nickname ? "" : " ph"}`}>{nickname || "닉네임 미설정"}</span>
+      <button className="mp-nick-edit" onClick={start}>수정</button>
+    </div>
+  );
+  return (
+    <div className="mp-nick editing">
+      <div className="mp-nick-row">
+        <input className="mp-nick-input" value={draft} maxLength={20} autoFocus
+          placeholder="닉네임 (2~20자)" onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") cancel(); }} />
+        <button className="mp-nick-save" disabled={busy} onClick={save}>{busy ? "저장 중…" : "저장"}</button>
+        <button className="mp-nick-cancel" disabled={busy} onClick={cancel}>취소</button>
+      </div>
+      {err && <span className="fav-err">{err}</span>}
+    </div>
+  );
+}
+
+// ───────── 마이페이지 — 내 정보 + 사이드 메뉴 레이아웃 ─────────
+function MyPage({ session, openReport, go }) {
+  const uid = session?.user?.id;
+  const email = session?.user?.email;
+  const [menu, setMenu] = useState("watchlist");
+  const [profile, setProfile] = useState(null);        // profiles 테이블(구독상태·가입일)
+  useEffect(() => {
+    let alive = true;
+    if (!supabase || !uid) return;
+    supabase.from("profiles").select("nickname,subscription_status,created_at").eq("id", uid).maybeSingle()
+      .then(({ data }) => { if (alive && data) setProfile(data); });
+    return () => { alive = false; };
+  }, [uid]);
+  if (!uid) {                                           // 미로그인 가드 — 로그인 유도
+    return (
+      <div className="mypage">
+        <h1 className="mp-title">마이페이지</h1>
+        <p className="muted">로그인 후 즐겨찾기한 곳을 볼 수 있습니다.</p>
+        <button className="btn-primary" onClick={() => go("app")}>로그인하러 가기</button>
+      </div>
+    );
+  }
+  const joined = (profile?.created_at || session?.user?.created_at || "").slice(0, 10);
+  const plan = profile?.subscription_status;
+  return (
+    <div className="mp">
+      <h1 className="mp-title">마이페이지</h1>
+      {/* 내 정보 — 닉네임(편집) + 이메일 + profiles(구독·가입일) */}
+      <header className="mp-head">
+        <div className="mp-avatar">{(profile?.nickname || email || "?").slice(0, 1).toUpperCase()}</div>
+        <div className="mp-id">
+          <NicknameEditor uid={uid} nickname={profile?.nickname}
+            onSaved={(v) => setProfile((p) => ({ ...(p || {}), nickname: v }))} />
+          <div className="mp-email">{email || "로그인 사용자"}</div>
+          <div className="mp-meta">
+            {plan && <span className="mp-plan">{plan === "free" ? "무료 플랜" : plan}</span>}
+            {joined && <span>가입일 {joined}</span>}
+          </div>
+        </div>
+      </header>
+      {/* 사이드 메뉴 + 콘텐츠 */}
+      <div className="mp-body">
+        <aside className="mp-side">
+          {MP_MENUS.map((m) => (
+            <button key={m.id} className={`mp-menu${menu === m.id ? " on" : ""}`} onClick={() => setMenu(m.id)}>{m.label}</button>
+          ))}
+        </aside>
+        <main className="mp-main">
+          {menu === "watchlist" && <WatchlistPanel uid={uid} openReport={openReport} />}
+        </main>
       </div>
     </div>
   );
@@ -303,6 +504,7 @@ function Header({ view, go, session, logout }) {
       <div className="h-right">
         <nav className="site-nav">
           {NAV.map((n) => <button key={n.id} className={view === n.id ? "on" : ""} onClick={() => go(n.id)}>{n.label}</button>)}
+          {session && <button className={view === "mypage" ? "on" : ""} onClick={() => go("mypage")}>마이페이지</button>}
         </nav>
         {session
           ? <button className="auth-btn" onClick={logout} title={session.user?.email}>로그아웃</button>
@@ -481,6 +683,7 @@ function Footer({ go }) {
 export default function App() {
   const [view, setView] = useState(() => window.location.hash.replace("#", "") || "home");
   const [session, setSession] = useState(null);
+  const [pendingAddr, setPendingAddr] = useState(null);   // 마이페이지→검색 분석 연결용
   useEffect(() => {
     const on = () => setView(window.location.hash.replace("#", "") || "home");
     window.addEventListener("hashchange", on);
@@ -494,10 +697,12 @@ export default function App() {
   }, []);
   const go = (v) => { window.location.hash = v; setView(v); window.scrollTo(0, 0); };
   const logout = async () => { if (supabase) await supabase.auth.signOut(); go("home"); };
+  const openReport = (address) => { setPendingAddr(address); go("app"); };   // 마이페이지 항목 → 검색 분석
 
   const needAuth = view === "app" && !session;        // ★게이트: 검색은 로그인 필수
   const body = needAuth ? <AuthPage onAuthed={() => go("app")} go={go} />
-    : view === "app" ? <Workspace />
+    : view === "app" ? <Workspace session={session} pendingAddr={pendingAddr} onConsumePending={() => setPendingAddr(null)} />
+    : view === "mypage" ? (session ? <MyPage session={session} openReport={openReport} go={go} /> : <AuthPage onAuthed={() => go("mypage")} go={go} />)
     : view === "guide" ? <Guide go={go} />
     : ["terms", "privacy", "disclaimer"].includes(view) ? <Legal kind={view} />
     : <Landing go={go} />;
