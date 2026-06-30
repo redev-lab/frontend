@@ -386,6 +386,22 @@ function WatchlistPanel({ uid, openReport }) {
 // 닉네임 형식 — 2~20자, 한글·영문·숫자·일부 기호(_ - .). 공백/특수문자 차단.
 const NICK_RE = /^[가-힣a-zA-Z0-9_.\-]{2,20}$/;
 
+// ★닉네임 저장(공용) — profiles 본인 행 update. 성공이면 null, 실패면 사용자용 메시지.
+//   중복은 DB UNIQUE(lower(nickname))가 막고 위반코드 23505를 잡는다(동시성 source of truth).
+async function updateNickname(uid, v) {
+  const { error } = await supabase.from("profiles").update({ nickname: v }).eq("id", uid);
+  if (!error) return null;
+  return error.code === "23505" ? "이미 사용 중인 닉네임입니다." : (error.message || "저장 실패");
+}
+// 사전 중복 체크(UX용) — true=사용중, false=가능, null=판단보류(조회 실패).
+//   ★RLS(profiles_self_select=본인 행만)로 직접 select는 남의 닉을 못 봄 → security definer RPC(nickname_taken)로 조회.
+//   대소문자 무시(RPC가 lower 비교). 최종 방어는 저장 시 UNIQUE 23505.
+async function nicknameTaken(v) {
+  const { data, error } = await supabase.rpc("nickname_taken", { p: v });
+  if (error) return null;
+  return Boolean(data);
+}
+
 // 닉네임 표시 + 인라인 편집 — profiles.nickname을 본인 행에 update(RLS profiles_self_update).
 // 중복은 DB UNIQUE(lower(nickname))가 막고, 위반코드 23505를 catch(동시성 source of truth).
 function NicknameEditor({ uid, nickname, onSaved }) {
@@ -400,12 +416,9 @@ function NicknameEditor({ uid, nickname, onSaved }) {
     if (!NICK_RE.test(v)) { setErr("2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다."); return; }
     if (v === (nickname || "")) { setEditing(false); return; }   // 변경 없음
     setBusy(true); setErr(null);
-    const { error } = await supabase.from("profiles").update({ nickname: v }).eq("id", uid);
+    const msg = await updateNickname(uid, v);                     // 공용 저장(23505 처리 포함)
     setBusy(false);
-    if (error) {                                                  // ★23505=UNIQUE 위반 → 중복
-      setErr(error.code === "23505" ? "이미 사용 중인 닉네임입니다." : (error.message || "저장 실패"));
-      return;
-    }
+    if (msg) { setErr(msg); return; }
     onSaved(v);                                                   // 카드 즉시 반영
     setEditing(false);
   };
@@ -426,6 +439,56 @@ function NicknameEditor({ uid, nickname, onSaved }) {
       </div>
       {err && <span className="fav-err">{err}</span>}
     </div>
+  );
+}
+
+// ───────── 첫 로그인 닉네임 설정 게이트 — 닉네임 없으면 메인 진입 전 1회(스킵 불가, 로그아웃은 가능) ─────────
+function NicknameSetup({ uid, onDone, logout }) {
+  const [draft, setDraft] = useState("");
+  const [avail, setAvail] = useState(null);            // null=미확인/형식미달, true=가능, false=사용중
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const v = draft.trim();
+  const validFmt = NICK_RE.test(v);
+  useEffect(() => {                                     // ★입력 중 사전 중복 체크(디바운스, UX)
+    setErr(null);
+    if (!validFmt) { setAvail(null); return; }
+    let alive = true;
+    const t = setTimeout(async () => {
+      const taken = await nicknameTaken(v);
+      if (alive) setAvail(taken == null ? null : !taken);
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+  }, [v, validFmt, uid]);
+  const save = async () => {
+    if (!validFmt) { setErr("2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다."); return; }
+    if (avail === false) { setErr("이미 사용 중인 닉네임입니다."); return; }
+    setBusy(true); setErr(null);
+    const msg = await updateNickname(uid, v);           // 최종 방어 = 23505
+    setBusy(false);
+    if (msg) { setErr(msg); if (msg.includes("사용 중")) setAvail(false); return; }
+    onDone(v);                                          // 메인 진입
+  };
+  return (
+    <main className="doc auth">
+      <div className="auth-card">
+        <h1>닉네임 설정</h1>
+        <p className="auth-sub">서비스 이용을 위해 <b>닉네임</b>을 설정해 주세요. (2~20자, 한글·영문·숫자·_-.)</p>
+        <input value={draft} maxLength={20} autoFocus placeholder="닉네임"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") save(); }} />
+        {v && (validFmt
+          ? (avail === false ? <div className="nick-hint bad">이미 사용 중인 닉네임입니다.</div>
+            : avail === true ? <div className="nick-hint ok">사용 가능한 닉네임입니다.</div>
+            : <div className="nick-hint">확인 중…</div>)
+          : <div className="nick-hint bad">2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다.</div>)}
+        <button className="btn-primary" disabled={busy || !validFmt || avail === false} onClick={save}>
+          {busy ? "저장 중…" : "닉네임 저장하고 시작하기"}
+        </button>
+        {err && <div className="auth-msg">{err}</div>}
+        <div className="auth-switch"><button onClick={logout}>로그아웃</button></div>
+      </div>
+    </main>
   );
 }
 
@@ -522,6 +585,20 @@ function AuthPage({ onAuthed, go }) {
   const [agree, setAgree] = useState(false);
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [nickname, setNickname] = useState("");
+  const [nickAvail, setNickAvail] = useState(null);   // null=미확인/형식미달, true=가능, false=사용중
+  const nv = nickname.trim();
+  const nickValid = NICK_RE.test(nv);
+  useEffect(() => {                                    // ★가입 모드 닉네임 사전 중복체크(디바운스, RPC)
+    setNickAvail(null);
+    if (mode !== "signup" || !nickValid || !supabase) return;
+    let alive = true;
+    const t = setTimeout(async () => {
+      const taken = await nicknameTaken(nv);
+      if (alive) setNickAvail(taken == null ? null : !taken);
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+  }, [nv, nickValid, mode]);
   if (!authReady) return (
     <main className="doc"><div className="legal-banner">인증이 아직 설정되지 않았습니다 — <b>.env</b>의
       <code> VITE_SUPABASE_URL</code>·<code>VITE_SUPABASE_ANON_KEY</code>를 넣고 재기동하세요(Supabase 셋업 후).</div></main>
@@ -531,8 +608,13 @@ function AuthPage({ onAuthed, go }) {
     try {
       if (mode === "signup") {
         if (!agree) { setMsg("개인정보(이메일) 수집·이용에 동의해야 가입할 수 있습니다."); setBusy(false); return; }
-        const { error } = await supabase.auth.signUp({ email, password: pw });
-        if (error) throw error;
+        if (!nickValid) { setMsg("닉네임은 2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다."); setBusy(false); return; }
+        if (nickAvail === false) { setMsg("이미 사용 중인 닉네임입니다."); setBusy(false); return; }
+        const { error } = await supabase.auth.signUp({ email, password: pw, options: { data: { nickname: nv } } });
+        if (error) {                                   // ★트리거가 닉네임 중복(UNIQUE)으로 실패하면 가입 에러
+          const dup = error.code === "23505" || /duplicate|already|database error/i.test(error.message || "");
+          throw new Error(dup ? "이미 사용 중인 닉네임입니다 — 다른 닉네임으로 다시 시도하세요." : (error.message || "가입 실패"));
+        }
         setMsg("확인 메일을 보냈습니다 — 메일의 링크로 인증 후 로그인하세요.");
       } else if (mode === "login") {
         const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
@@ -555,12 +637,20 @@ function AuthPage({ onAuthed, go }) {
         <input type="email" placeholder="이메일" value={email} onChange={(e) => setEmail(e.target.value)} />
         {mode !== "reset" && <input type="password" placeholder="비밀번호 (6자 이상)" value={pw} onChange={(e) => setPw(e.target.value)} />}
         {mode === "signup" && (
-          <label className="auth-agree">
-            <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
-            <span>[필수] 개인정보(이메일) 수집·이용 동의 — <a onClick={() => go("privacy")}>개인정보처리방침</a> · <a onClick={() => go("disclaimer")}>면책</a> (초안)</span>
-          </label>
+          <>
+            <input placeholder="닉네임 (2~20자)" value={nickname} maxLength={20} onChange={(e) => setNickname(e.target.value)} />
+            {nv && (nickValid
+              ? (nickAvail === false ? <div className="nick-hint bad">이미 사용 중인 닉네임입니다.</div>
+                : nickAvail === true ? <div className="nick-hint ok">사용 가능한 닉네임입니다.</div>
+                : <div className="nick-hint">확인 중…</div>)
+              : <div className="nick-hint bad">2~20자, 한글·영문·숫자·_-. 만 사용할 수 있습니다.</div>)}
+            <label className="auth-agree">
+              <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
+              <span>[필수] 개인정보(이메일) 수집·이용 동의 — <a onClick={() => go("privacy")}>개인정보처리방침</a> · <a onClick={() => go("disclaimer")}>면책</a> (초안)</span>
+            </label>
+          </>
         )}
-        <button className="btn-primary" disabled={busy} onClick={submit}>{busy ? "처리 중…" : title}</button>
+        <button className="btn-primary" disabled={busy || (mode === "signup" && (!nickValid || nickAvail === false))} onClick={submit}>{busy ? "처리 중…" : title}</button>
         {msg && <div className="auth-msg">{msg}</div>}
         <div className="auth-switch">
           {mode !== "login" && <button onClick={() => { setMode("login"); setMsg(null); }}>로그인</button>}
@@ -684,6 +774,7 @@ export default function App() {
   const [view, setView] = useState(() => window.location.hash.replace("#", "") || "home");
   const [session, setSession] = useState(null);
   const [pendingAddr, setPendingAddr] = useState(null);   // 마이페이지→검색 분석 연결용
+  const [nick, setNick] = useState(undefined);            // undefined=로딩, null=미설정(게이트), 문자열=설정됨
   useEffect(() => {
     const on = () => setView(window.location.hash.replace("#", "") || "home");
     window.addEventListener("hashchange", on);
@@ -695,18 +786,28 @@ export default function App() {
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+  useEffect(() => {                                    // ★로그인 시 닉네임 조회 — 없으면 설정 게이트
+    if (!supabase || !session) { setNick(undefined); return; }
+    let alive = true;
+    supabase.from("profiles").select("nickname").eq("id", session.user.id).maybeSingle()
+      .then(({ data }) => { if (alive) setNick(data?.nickname || null); });   // 빈값/NULL → null(미설정)
+    return () => { alive = false; };
+  }, [session]);
   const go = (v) => { window.location.hash = v; setView(v); window.scrollTo(0, 0); };
   const logout = async () => { if (supabase) await supabase.auth.signOut(); go("home"); };
   const openReport = (address) => { setPendingAddr(address); go("app"); };   // 마이페이지 항목 → 검색 분석
 
   const needAuth = view === "app" && !session;        // ★게이트: 검색은 로그인 필수
   const body = needAuth ? <AuthPage onAuthed={() => go("app")} go={go} />
-    : view === "app" ? <Workspace session={session} pendingAddr={pendingAddr} onConsumePending={() => setPendingAddr(null)} />
+    : view === "app" ? (
+        nick === undefined ? <main className="doc auth"><div className="auth-card"><p className="muted">불러오는 중…</p></div></main>
+        : !nick ? <NicknameSetup uid={session.user.id} onDone={(v) => setNick(v)} logout={logout} />   // ★닉네임 없으면 설정(스킵 불가)
+        : <Workspace session={session} pendingAddr={pendingAddr} onConsumePending={() => setPendingAddr(null)} />)
     : view === "mypage" ? (session ? <MyPage session={session} openReport={openReport} go={go} /> : <AuthPage onAuthed={() => go("mypage")} go={go} />)
     : view === "guide" ? <Guide go={go} />
     : ["terms", "privacy", "disclaimer"].includes(view) ? <Legal kind={view} />
     : <Landing go={go} />;
-  const fullApp = view === "app" && !needAuth;        // 풀높이 지도 레이아웃은 로그인 후에만
+  const fullApp = view === "app" && !needAuth && !!nick;   // 풀높이 지도 = 로그인 + 닉네임 설정 후에만(게이트/로딩은 일반 레이아웃)
   return (
     <div className={`site ${fullApp ? "is-app" : ""}`}>
       <Header view={view} go={go} session={session} logout={logout} />
