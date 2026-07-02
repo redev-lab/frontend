@@ -735,6 +735,40 @@ function AuthPage({ onAuthed, go }) {
   );
 }
 
+// 메인 노출용 — 게시판 "이주의 Best" Top3(읽기 공개 RPC, 비로그인도 보임). 0개면 섹션 미표시.
+function LandingBest({ go }) {
+  const [best, setBest] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    if (!supabase) return;
+    supabase.rpc("board_best", { days: 7, lim: 3 })
+      .then(({ data }) => { if (alive && Array.isArray(data)) setBest(data); });   // 실패/0개면 섹션 생략
+    return () => { alive = false; };
+  }, []);
+  if (best.length === 0) return null;
+  const MEDALS = ["🥇", "🥈", "🥉"];
+  return (
+    <section className="lp-best-wrap">
+      <div className="lp-inner">
+        <div className="lp-best-head">
+          <h2 className="lp-best-h">🔥 지금 사람들이 보는 글</h2>
+          <button className="lp-best-more" onClick={() => go("board")}>게시판 가기 →</button>
+        </div>
+        <ul className="lp-best">
+          {best.map((p, i) => (
+            <li key={p.id} className="lp-best-item" onClick={() => go(`board/${p.id}`)} role="button">
+              <span className="lp-best-medal">{MEDALS[i]}</span>
+              <span className="lp-best-title">{p.title}</span>
+              <span className="lp-best-author">{p.author_nick || "익명"}</span>
+              {p.like_count > 0 && <span className="lp-best-like">♥ {p.like_count}</span>}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
 function Landing({ go }) {
   return (
     <main className="landing">
@@ -750,6 +784,7 @@ function Landing({ go }) {
           </div>
         </div>
       </section>
+      <LandingBest go={go} />
       <section className="lp-feat-wrap">
         <div className="lp-inner">
           <div className="lp-feat">
