@@ -331,8 +331,16 @@ function Workspace({ session, pendingAddr, onConsumePending }) {
     setReport({ loading: true });
     /* ★stage 하드코딩 금지(누수 경로) — 실제 단계를 모르면 보내지 않는다. in_zone+stage일 때만 '언제' 출력 */
     authedFetch("/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: a, property_type: "다세대" }) })
-      .then((r) => r.json())
-      .then((r) => { setReport(r); if (r.lat) setPos([r.lat, r.lon]); })
+      .then(async (r) => {
+        if (r.status === 429) {                        // ★한도 초과 — alert 남발 말고 인라인 안내
+          const d = await r.json().catch(() => ({}));
+          setReport({ rateLimited: d.detail || "요청이 많습니다. 잠시 후 다시 시도해주세요." });
+          return;
+        }
+        const j = await r.json();
+        setReport(j);
+        if (j.lat) setPos([j.lat, j.lon]);
+      })
       .catch((e) => setReport({ error: String(e) }));
   };
   // ★마이페이지 항목 클릭 → pendingAddr로 들어옴: 검색탭 + 주소 세팅 + 분석을 같은 경로로 재사용.
@@ -357,7 +365,9 @@ function Workspace({ session, pendingAddr, onConsumePending }) {
               <input value={addr} onChange={(e) => setAddr(e.target.value)} placeholder="지번 주소 (예: 성북구 정릉동 170-1)" />
               <button onClick={() => search()}>분석</button>
             </div>
-            {report?.loading ? <p className="muted">분석 중…</p> : <ReportPanel r={report} session={session} address={addr} />}
+            {report?.loading ? <p className="muted">분석 중…</p>
+              : report?.rateLimited ? <p className="rate-limit-msg" role="alert">{report.rateLimited}</p>
+              : <ReportPanel r={report} session={session} address={addr} />}
           </>
         ) : (
           <Screener onPick={setPos} />

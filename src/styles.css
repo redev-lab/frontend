@@ -356,6 +356,9 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
 .filters { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
 .filters select, .filters input { padding: 6px; }
 .muted { color: #888; font-size: 12px; }
+/* ★rate limit 초과 인라인 안내(검색 근처, 경고 톤 — alert 대체) */
+.rate-limit-msg { margin: 10px 2px 0; padding: 10px 12px; font-size: 13px; line-height: 1.5;
+  color: #8a5a00; background: #fff7e6; border: 1px solid #ffe0a3; border-radius: 8px; }
 /* ★범례 — 색 의미·R18 오독 차단·군집 설명(설명서 없이 3초 이해) */
 .legend { position: absolute; bottom: 16px; right: 16px; background: #fff; padding: 10px 12px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.18); font-size: 11px; z-index: 1000; width: 230px; }
 .lg-title { font-weight: 700; font-size: 12px; margin-bottom: 6px; color: #0f172a; }
