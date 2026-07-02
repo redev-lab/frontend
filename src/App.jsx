@@ -60,13 +60,24 @@ const stripYear = (s) => (s || "").replace(/\s*\(\d{4}\)\s*$/, "").trim();   // 
 const statusText = (m) => (m.t ? `${m.t}년 지정` : "");   // ★진행상태(completed) 미표시 — 신뢰도 불확실. 지정연도(t)만.
 
 // ★히어로 — "닮은 재개발 동네"(우리 강점, 최상위). r.retrieval.matches.
+// 유사도 표기 — similarity_pct("상위 N%") 우선, 없으면 raw %로 graceful fallback(구버전 캐시/폴백).
+const simText = (m) => {
+  const p = m?.similarity_pct;
+  if (p == null) return `${Math.round(m.similarity * 100)}%`;       // 폴백(구버전): raw %
+  return p < 1 ? "상위 1% 이내" : `상위 ${p}%`;
+};
+
 function SimilarHero({ matches }) {
   const [top, ...rest] = matches;
+  const hasPct = top?.similarity_pct != null;
   return (
     <section className="sim">
       <h2 className="sim-title">이 동네는 재개발로 진행된 동네와 닮았습니다</h2>
       <div className="sim-top">
-        <div className="sim-pct">{Math.round(top.similarity * 100)}<small>%</small></div>
+        <div className="sim-num">
+          <div className="sim-pct">{simText(top)}</div>
+          <div className="sim-envlabel">환경 유사</div>
+        </div>
         <div className="sim-top-i">
           <div className="sim-name">{stripYear(top.display_name)}</div>
           {statusText(top) && <span className="sim-status">{statusText(top)}</span>}
@@ -77,12 +88,13 @@ function SimilarHero({ matches }) {
           {rest.map((m, i) => (
             <div key={i} className="sim-card">
               <div className="sim-name-s">{stripYear(m.display_name)}</div>
-              <div className="sim-meta-s">{Math.round(m.similarity * 100)}% 닮음{statusText(m) ? ` · ${statusText(m)}` : ""}</div>
+              <div className="sim-meta-s">{simText(m)}{statusText(m) ? ` · ${statusText(m)}` : ""}</div>
             </div>
           ))}
         </div>
       )}
-      <p className="sim-disc">재개발이 진행된 실제 동네와 얼마나 닮았는지를 보여줍니다. 닮음이 곧 재개발 확정은 아닙니다.</p>
+      <p className="sim-disc">재개발이 진행된 실제 동네와 얼마나 닮았는지를 보여줍니다.
+        {hasPct && " ‘상위 N%’는 서울 후보 구역 간 비교에서의 상대 순위입니다."} 닮음이 곧 재개발 확정은 아닙니다.</p>
     </section>
   );
 }
@@ -90,7 +102,18 @@ function SimilarHero({ matches }) {
 // 왜 닮았나 — top_similar_axes에 든 축만 + query_metrics 입력값(매치 수치는 API에 없음 → 비교 안 함).
 const _AXIS = { "노후도": ["old_area_ratio", "%", 100], "면적": ["area_ha", "ha", 1], "호수밀도": ["house_density", "", 1], "접도율": ["abut_ratio", "%", 100] };
 function WhySimilar({ retrieval }) {
-  const axes = retrieval?.matches?.[0]?.top_similar_axes || [];
+  const top = retrieval?.matches?.[0];
+  const ctr = top?.contrast;
+  // ★신규: 1위 구역 대비설명(닮은 축 / 다른 축). 없으면(구버전) 기존 top_similar_axes+query_metrics로 폴백.
+  if (ctr && ctr.similar?.length) {
+    return (
+      <section className="why">
+        <h3>왜 닮았나</h3>
+        <p>닮은 점: {ctr.similar.join("·")}{ctr.different ? ` / 다른 점: ${ctr.different}` : ""}</p>
+      </section>
+    );
+  }
+  const axes = top?.top_similar_axes || [];
   const qm = retrieval?.query_metrics || {};
   const parts = axes.map((ax) => {
     const m = _AXIS[ax]; if (!m) return null;
