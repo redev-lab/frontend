@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { MapContainer, TileLayer, CircleMarker, Marker, useMapEvents, useMap } from "react-leaflet";
 import { supabase, authReady, authedFetch } from "./supabase";
 import { MapPin, Map as MapIcon, FileText, KeyRound, ShieldCheck, ArrowRight, Heart } from "lucide-react";
@@ -13,20 +13,34 @@ const simGrade = (pct) => (pct == null ? null : pct <= 33 ? "높음" : pct <= 66
 // ★군집 외곽선(점선)은 제거 — 볼록껍질이 도로·공원을 가로질러 '재개발 구역 경계'로 오독 위험(근거 약함).
 function BboxLayer() {
   const [pts, setPts] = useState([]);
+  const timerRef = useRef(null);      // 디바운스 타이머
+  const abortRef = useRef(null);      // 진행 중 요청(이전 것 취소용 — race 방지)
   const fetchBbox = async (map) => {
     const b = map.getBounds();
-    const q = `west=${b.getWest()}&south=${b.getSouth()}&east=${b.getEast()}&north=${b.getNorth()}&limit=1500`;
     if (map.getZoom() < 13) { setPts([]); return; } // 줌 낮으면 생략(통짜 렌더 금지)
-    // ★/report·/screen과 동일하게 authedFetch로 Bearer 토큰 부착(401 해소).
-    // authedFetch엔 공통 401 처리가 없어 — 토큰 만료 등으로 401/실패 시 조용히 색점만 미표시(앱 안 죽게).
+    const q = `west=${b.getWest()}&south=${b.getSouth()}&east=${b.getEast()}&north=${b.getNorth()}&limit=1500`;
+    abortRef.current?.abort();                       // ★이전 요청 취소 → 늦은 응답이 최신 결과 덮어쓰기 방지
+    const ac = new AbortController();
+    abortRef.current = ac;
+    // ★/report·/screen과 동일하게 authedFetch로 Bearer 토큰 부착(401 해소). signal은 opts로 그대로 전달됨.
+    // authedFetch엔 공통 401 처리가 없어 — 토큰 만료/취소/실패 시 조용히 색점만 미표시(앱 안 죽게).
     try {
-      const r = await authedFetch(`/screen/bbox?${q}`);
+      const r = await authedFetch(`/screen/bbox?${q}`, { signal: ac.signal });
       if (!r.ok) return;
       const d = await r.json();
-      setPts(d.results || []);
-    } catch { /* 네트워크·인증 실패 — 무시 */ }
+      if (!ac.signal.aborted) setPts(d.results || []);   // 취소된 응답은 버림(stale 방지)
+    } catch { /* abort·네트워크·인증 실패 — 무시 */ }
   };
-  const map = useMapEvents({ moveend: () => fetchBbox(map) });
+  // ★moveend 400ms 디바운스 — 빠른 드래그/줌 연타 시 마지막 1회만 요청.
+  const scheduleFetch = (map) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => fetchBbox(map), 400);
+  };
+  const map = useMapEvents({ moveend: () => scheduleFetch(map) });
+  useEffect(() => () => {                             // 언마운트 정리: 타이머·진행 요청 취소
+    if (timerRef.current) clearTimeout(timerRef.current);
+    abortRef.current?.abort();
+  }, []);
   // 줌아웃 시 백엔드가 점수 무관 균등 샘플로 솎음(분포 보존) → 색 인상 줌 일관. 각 점=필지 환경 유사도.
   return pts.map((p) => (
     <CircleMarker key={p.pnu} center={[p.lat, p.lon]} radius={4}
